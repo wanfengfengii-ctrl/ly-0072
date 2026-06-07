@@ -9,7 +9,8 @@ from app.logic.validator import analyze_component_risk, calculate_statistics
 
 
 def generate_html_report(building_id: int = None, component_id: int = None,
-                     output_path: str = None) -> str:
+                     output_path: str = None, include_charts: bool = True,
+                     include_stats: bool = True, include_risk: bool = True) -> str:
     threshold = SettingsRepository.get_moisture_threshold()
     consec_count = SettingsRepository.get_consecutive_count()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -109,7 +110,7 @@ def generate_html_report(building_id: int = None, component_id: int = None,
        <strong>检测位置:</strong> {', '.join(risk_result['positions']) or '无'}
 """)
 
-            if records:
+            if records and include_stats:
                 stats = calculate_statistics(records)
                 html_parts.append(f"""
     <table>
@@ -122,59 +123,60 @@ def generate_html_report(building_id: int = None, component_id: int = None,
     </table>
 """)
 
-            if risk_result["consecutive_high_risk"]:
-                html_parts.append("<h4>连续超标记录</h4><table>")
-                html_parts.append("<tr><th>位置</th><th>开始时间</th><th>结束时间</th><th>连续次数</th><th>最高值</th><th>平均值</th></tr>")
-                for item in risk_result["consecutive_high_risk"]:
-                    html_parts.append(
-                        f"<tr><td>{item['position']}</td>"
-                        f"<td>{item['start_time']}</td>"
-                        f"<td>{item['end_time']}</td>"
-                        f"<td>{item['count']}次</td>"
-                        f"<td>{item['max_moisture']}%</td>"
-                        f"<td>{item['avg_moisture']}%</td></tr>"
-                    )
-                html_parts.append("</table>")
+            if include_risk:
+                if risk_result["consecutive_high_risk"]:
+                    html_parts.append("<h4>连续超标记录</h4><table>")
+                    html_parts.append("<tr><th>位置</th><th>开始时间</th><th>结束时间</th><th>连续次数</th><th>最高值</th><th>平均值</th></tr>")
+                    for item in risk_result["consecutive_high_risk"]:
+                        html_parts.append(
+                            f"<tr><td>{item['position']}</td>"
+                            f"<td>{item['start_time']}</td>"
+                            f"<td>{item['end_time']}</td>"
+                            f"<td>{item['count']}次</td>"
+                            f"<td>{item['max_moisture']}%</td>"
+                            f"<td>{item['avg_moisture']}%</td></tr>"
+                        )
+                    html_parts.append("</table>")
 
-            if risk_result["long_term_moisture"]:
-                html_parts.append("<h4>长期潮湿记录</h4><table>")
-                html_parts.append("<tr><th>位置</th><th>开始时间</th><th>结束时间</th><th>持续天数</th><th>平均值</th><th>超标比例</th></tr>")
-                for item in risk_result["long_term_moisture"]:
-                    html_parts.append(
-                        f"<tr><td>{item['position']}</td>"
-                        f"<td>{item['start_time']}</td>"
-                        f"<td>{item['end_time']}</td>"
-                        f"<td>{item['duration_days']}天</td>"
-                        f"<td>{item['avg_moisture']}%</td>"
-                        f"<td>{item['high_ratio']}%</td></tr>"
-                    )
-                html_parts.append("</table>")
+                if risk_result["long_term_moisture"]:
+                    html_parts.append("<h4>长期潮湿记录</h4><table>")
+                    html_parts.append("<tr><th>位置</th><th>开始时间</th><th>结束时间</th><th>持续天数</th><th>平均值</th><th>超标比例</th></tr>")
+                    for item in risk_result["long_term_moisture"]:
+                        html_parts.append(
+                            f"<tr><td>{item['position']}</td>"
+                            f"<td>{item['start_time']}</td>"
+                            f"<td>{item['end_time']}</td>"
+                            f"<td>{item['duration_days']}天</td>"
+                            f"<td>{item['avg_moisture']}%</td>"
+                            f"<td>{item['high_ratio']}%</td></tr>"
+                        )
+                    html_parts.append("</table>")
 
-            if risk_result["sudden_rises"]:
-                html_parts.append("<h4>含水率骤升记录</h4><table>")
-                html_parts.append("<tr><th>位置</th><th>上次时间</th><th>本次时间</th><th>上次值</th><th>本次值</th><th>增幅</th></tr>")
-                for item in risk_result["sudden_rises"]:
-                    html_parts.append(
-                        f"<tr><td>{item['position']}</td>"
-                        f"<td>{item['prev_time']}</td>"
-                        f"<td>{item['curr_time']}</td>"
-                        f"<td>{item['prev_moisture']}%</td>"
-                        f"<td>{item['curr_moisture']}%</td>"
-                        f"<td>+{item['rise_ratio']}%</td></tr>"
-                    )
-                html_parts.append("</table>")
+                if risk_result["sudden_rises"]:
+                    html_parts.append("<h4>含水率骤升记录</h4><table>")
+                    html_parts.append("<tr><th>位置</th><th>上次时间</th><th>本次时间</th><th>上次值</th><th>本次值</th><th>增幅</th></tr>")
+                    for item in risk_result["sudden_rises"]:
+                        html_parts.append(
+                            f"<tr><td>{item['position']}</td>"
+                            f"<td>{item['prev_time']}</td>"
+                            f"<td>{item['curr_time']}</td>"
+                            f"<td>{item['prev_moisture']}%</td>"
+                            f"<td>{item['curr_moisture']}%</td>"
+                            f"<td>+{item['rise_ratio']}%</td></tr>"
+                        )
+                    html_parts.append("</table>")
 
-            if risk_result["missing_records"]:
-                html_parts.append("<h4>记录缺失</h4><table>")
-                html_parts.append("<tr><th>位置</th><th>上次时间</th><th>下次时间</th><th>间隔天数</th></tr>")
-                for item in risk_result["missing_records"]:
-                    html_parts.append(
-                        f"<tr><td>{item['position']}</td>"
-                        f"<td>{item['prev_time']}</td>"
-                        f"<td>{item['next_time']}</td>"
-                        f"<td>{item['gap_days']}天</td></tr>"
-                    )
-                html_parts.append("</table>")
+                if risk_result["missing_records"]:
+                    html_parts.append("<h4>记录缺失</h4><table>")
+                    html_parts.append("<tr><th>位置</th><th>上次时间</th><th>下次时间</th><th>间隔天数</th></tr>")
+                    for item in risk_result["missing_records"]:
+                        html_parts.append(
+                            f"<tr><td>{item['position']}</td>"
+                            f"<td>{item['prev_time']}</td>"
+                            f"<td>{item['next_time']}</td>"
+                            f"<td>{item['gap_days']}天</td></tr>"
+                        )
+                    html_parts.append("</table>")
 
     html_parts.append(f"""
     <h2>总览</h2>
@@ -198,7 +200,8 @@ def generate_html_report(building_id: int = None, component_id: int = None,
 
 
 def batch_export_reports(output_dir: str, building_id: int = None,
-                         archive: bool = True) -> List[Dict[str, Any]]:
+                         archive: bool = True, include_charts: bool = True,
+                         include_stats: bool = True, include_risk: bool = True) -> List[Dict[str, Any]]:
     results = []
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d_%H%M%S")
@@ -219,7 +222,13 @@ def batch_export_reports(output_dir: str, building_id: int = None,
         file_path = os.path.join(output_dir, file_name)
 
         try:
-            generate_html_report(building_id=building["id"], output_path=file_path)
+            generate_html_report(
+                building_id=building["id"], 
+                output_path=file_path,
+                include_charts=include_charts,
+                include_stats=include_stats,
+                include_risk=include_risk
+            )
             file_size = os.path.getsize(file_path)
 
             archive_id = None

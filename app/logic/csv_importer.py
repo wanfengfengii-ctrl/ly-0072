@@ -174,45 +174,48 @@ def validate_csv_content(file_path: str, component_id: int,
                     "errors": errors
                 })
                 result["error_count"] += 1
-                if not skip_errors:
-                    continue
+                continue
 
-            if is_valid or skip_errors:
-                measure_time = parse_measure_time(str(row_data["measure_time"]).strip())
-                position = str(row_data["measure_position"]).strip()
-                normalized_time = format_measure_time(measure_time)
-                key = normalized_time
-
-                if key in seen_keys:
-                    result["error_rows"].append({
-                        "row_num": idx,
-                        "row_data": row,
-                        "errors": [f"第 {idx} 行: 检测时间在CSV中重复（同一构件同一时间只能有一条记录）"]
-                    })
-                    result["duplicate_count"] += 1
-                    continue
-                seen_keys.add(key)
-
-                if component_id and check_duplicate_time(
-                    component_id, normalized_time
-                ):
-                    result["error_rows"].append({
-                        "row_num": idx,
-                        "row_data": row,
-                        "errors": [f"第 {idx} 行: 该检测时间的记录已存在于数据库（同一构件同一时间只能有一条记录）"]
-                    })
-                    result["duplicate_count"] += 1
-                    continue
-
-            if is_valid:
-                result["valid_rows"].append({
+            measure_time = parse_measure_time(str(row_data["measure_time"]).strip())
+            if not measure_time:
+                result["error_rows"].append({
                     "row_num": idx,
-                    "row_data": row_data,
-                    "normalized_time": format_measure_time(
-                        parse_measure_time(str(row_data["measure_time"]).strip())
-                    )
+                    "row_data": row,
+                    "errors": [f"第 {idx} 行: 检测时间格式无效"]
                 })
-                result["valid_count"] += 1
+                result["error_count"] += 1
+                continue
+
+            normalized_time = format_measure_time(measure_time)
+            key = normalized_time
+
+            if key in seen_keys:
+                result["error_rows"].append({
+                    "row_num": idx,
+                    "row_data": row,
+                    "errors": [f"第 {idx} 行: 检测时间在CSV中重复（同一构件同一时间只能有一条记录）"]
+                })
+                result["duplicate_count"] += 1
+                continue
+            seen_keys.add(key)
+
+            if component_id and check_duplicate_time(
+                component_id, normalized_time
+            ):
+                result["error_rows"].append({
+                    "row_num": idx,
+                    "row_data": row,
+                    "errors": [f"第 {idx} 行: 该检测时间的记录已存在于数据库（同一构件同一时间只能有一条记录）"]
+                })
+                result["duplicate_count"] += 1
+                continue
+
+            result["valid_rows"].append({
+                "row_num": idx,
+                "row_data": row_data,
+                "normalized_time": normalized_time
+            })
+            result["valid_count"] += 1
 
     except Exception as e:
         result["errors"].append(f"校验过程出错: {str(e)}")

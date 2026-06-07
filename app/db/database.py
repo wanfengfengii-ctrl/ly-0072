@@ -285,7 +285,12 @@ class ComponentRepository:
     def get_by_id(component_id: int) -> Optional[Dict[str, Any]]:
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM components WHERE id=?", (component_id,))
+            cursor.execute("""
+                SELECT c.*, b.name as building_name 
+                FROM components c 
+                LEFT JOIN buildings b ON c.building_id = b.id 
+                WHERE c.id=?
+            """, (component_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
 

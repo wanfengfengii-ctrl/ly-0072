@@ -1318,7 +1318,13 @@ class MainWindow(QMainWindow):
             self.comparison_table.setItem(row, 0, QTableWidgetItem(comp["code"]))
             self.comparison_table.setItem(row, 1, QTableWidgetItem(comp["name"]))
             self.comparison_table.setItem(row, 2, QTableWidgetItem(comp["component_type"]))
-            self.comparison_table.setItem(row, 3, QTableWidgetItem(comp.get("position", "") or "-"))
+            if group_by == "building":
+                group_value = comp.get("building_name", "") or "未知建筑"
+            elif group_by == "type":
+                group_value = comp.get("component_type", "") or "其他"
+            else:
+                group_value = comp.get("position", "") or "-"
+            self.comparison_table.setItem(row, 3, QTableWidgetItem(group_value))
             self.comparison_table.setItem(row, 4, QTableWidgetItem(str(comp["record_count"])))
             avg_item = QTableWidgetItem(f"{comp['stats']['avg']}%")
             if comp["stats"]["avg"] > threshold:
@@ -1833,7 +1839,10 @@ class MainWindow(QMainWindow):
                 results = batch_export_reports(
                     output_dir=data["output_dir"],
                     building_id=data["building_id"],
-                    archive=data["archive"]
+                    archive=data["archive"],
+                    include_charts=data["include_charts"],
+                    include_stats=data["include_stats"],
+                    include_risk=data["include_risk"]
                 )
                 success = sum(1 for r in results if r["success"])
                 failed = len(results) - success
