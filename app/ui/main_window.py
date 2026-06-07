@@ -346,6 +346,7 @@ class MainWindow(QMainWindow):
         title_label = QLabel(title)
         title_label.setStyleSheet("color: #666; font-size: 12px;")
         value_label = QLabel(value)
+        value_label.setObjectName("value")
         value_label.setStyleSheet(f"color: {color}; font-size: 24px; font-weight: bold;")
         layout.addWidget(title_label)
         layout.addWidget(value_label)
@@ -949,6 +950,11 @@ class MainWindow(QMainWindow):
             self._refresh_records_table()
             self._refresh_chart()
             self._refresh_risk_analysis()
+
+        current_tab = self.tabs.tabText(self.tabs.currentIndex())
+        if "病害闭环" in current_tab:
+            self._refresh_defects()
+            self._refresh_workorders()
 
     def _on_tree_context_menu(self, pos: QPoint):
         item = self.tree.itemAt(pos)
@@ -2056,11 +2062,12 @@ class MainWindow(QMainWindow):
     def _refresh_defects(self):
         status_filter = self.defect_status_filter.currentData()
         type_filter = self.defect_type_filter.currentData()
-        selected = self._get_selected_building_from_tree()
-        building_id = selected["building_id"] if selected else None
+        building_id = getattr(self, "current_building_id", None)
+        component_id = getattr(self, "current_component_id", None)
 
         defects = DefectRepository.get_all(
-            building_id=building_id, status=status_filter, defect_type=type_filter
+            building_id=building_id, component_id=component_id,
+            status=status_filter, defect_type=type_filter
         )
 
         headers = ["ID", "建筑", "构件", "病害类型", "严重程度", "状态", "发现日期", "描述"]
@@ -2110,13 +2117,20 @@ class MainWindow(QMainWindow):
         self._refresh_defect_charts()
 
     def _refresh_defect_stats(self):
-        selected = self._get_selected_building_from_tree()
-        building_id = selected["building_id"] if selected else None
+        building_id = getattr(self, "current_building_id", None)
         stats = DefectRepository.get_statistics(building_id)
-        self.defect_stat_total.findChild(QLabel, "value").setText(str(stats.get("total", 0)))
-        self.defect_stat_pending.findChild(QLabel, "value").setText(str(stats.get("待处置", 0)))
-        self.defect_stat_processing.findChild(QLabel, "value").setText(str(stats.get("处置中", 0)))
-        self.defect_stat_completed.findChild(QLabel, "value").setText(str(stats.get("已完成", 0)))
+        total_label = self.defect_stat_total.findChild(QLabel, "value")
+        pending_label = self.defect_stat_pending.findChild(QLabel, "value")
+        processing_label = self.defect_stat_processing.findChild(QLabel, "value")
+        completed_label = self.defect_stat_completed.findChild(QLabel, "value")
+        if total_label:
+            total_label.setText(str(stats.get("total", 0)))
+        if pending_label:
+            pending_label.setText(str(stats.get("待处置", 0)))
+        if processing_label:
+            processing_label.setText(str(stats.get("处置中", 0)))
+        if completed_label:
+            completed_label.setText(str(stats.get("已完成", 0)))
 
     def _check_defect_overdue(self):
         reminders = DefectRepository.get_overdue_reminders()
@@ -2132,8 +2146,7 @@ class MainWindow(QMainWindow):
             self.defect_reminder_banner.hide()
 
     def _refresh_defect_charts(self):
-        selected = self._get_selected_building_from_tree()
-        building_id = selected["building_id"] if selected else None
+        building_id = getattr(self, "current_building_id", None)
         stats = DefectRepository.get_statistics(building_id)
 
         status_data = {}
@@ -2152,8 +2165,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_workorders(self):
         status_filter = self.wo_status_filter.currentData()
-        selected = self._get_selected_building_from_tree()
-        building_id = selected["building_id"] if selected else None
+        building_id = getattr(self, "current_building_id", None)
 
         workorders = WorkOrderRepository.get_all(
             building_id=building_id, status=status_filter
@@ -2278,7 +2290,7 @@ class MainWindow(QMainWindow):
         if DefectRepository.has_open_work_order(did):
             QMessageBox.warning(self, "提示", "该病害已有未关闭的维修工单，请先处理现有工单")
             return
-        dlg = WorkOrderDialog(self, defect_id=did)
+        dlg = WorkOrderDialog(self, default_defect_id=did)
         if dlg.exec():
             data = dlg.get_data()
             try:
