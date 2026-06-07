@@ -2,10 +2,10 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QHeaderView, QMessageBox, QTabWidget,
-    QComboBox, QGroupBox, QFormLayout, QDoubleSpinBox, QSpinBox,
-    QFileDialog, QTextEdit, QSizePolicy, QAbstractItemView
+    QComboBox, QGroupBox, QFormLayout, QDoubleSpinBox,
+    QFileDialog, QTextEdit, QSizePolicy, QAbstractItemView, QMenu
 )
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QPoint
 from PySide6.QtGui import QFont, QColor, QIcon, QAction
 from typing import Optional, Dict, Any
 
@@ -257,10 +257,9 @@ class MainWindow(QMainWindow):
         self.spin_threshold.setValue(SettingsRepository.get_moisture_threshold())
         form.addRow("含水率预警阈值:", self.spin_threshold)
 
-        self.spin_consecutive = QSpinBox()
-        self.spin_consecutive.setRange(2, 20)
-        self.spin_consecutive.setValue(SettingsRepository.get_consecutive_count())
-        form.addRow("连续超标判定次数:", self.spin_consecutive)
+        fixed_label = QLabel("连续 3 次超过阈值判定为高风险（已固定）")
+        fixed_label.setStyleSheet("color: #666; font-style: italic;")
+        form.addRow("连续超标判定:", fixed_label)
 
         self.btn_save_settings = QPushButton("保存设置")
         self.btn_save_settings.clicked.connect(self._on_save_settings)
@@ -352,8 +351,102 @@ class MainWindow(QMainWindow):
             self._refresh_chart()
             self._refresh_risk_analysis()
 
-    def _on_tree_context_menu(self, pos):
-        pass
+    def _on_tree_context_menu(self, pos: QPoint):
+        item = self.tree.itemAt(pos)
+        if not item:
+            return
+
+        data = item.data(0, Qt.UserRole)
+        if not data:
+            return
+
+        menu = QMenu(self)
+
+        edit_action = menu.addAction("编辑")
+        delete_action = menu.addAction("删除")
+
+        action = menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+        if action == edit_action:
+            self._on_edit_item(data)
+        elif action == delete_action:
+            self._on_delete_item(data)
+
+    def _on_edit_item(self, data: Dict[str, Any]):
+        if data["type"] == "building":
+            building = BuildingRepository.get_by_id(data["id"])
+            if not building:
+                return
+            dlg = BuildingDialog(self, building=building)
+            if dlg.exec():
+                form_data = dlg.get_data()
+                try:
+                    BuildingRepository.update(data["id"], **form_data)
+                    self.refresh_buildings()
+                except Exception as e:
+                    QMessageBox.critical(self, "错误", f"保存失败: {str(e)}")
+        elif data["type"] == "component":
+            component = ComponentRepository.get_by_id(data["id"])
+            if not component:
+                return
+            buildings = BuildingRepository.get_all()
+            dlg = ComponentDialog(self, buildings=buildings, component=component)
+            if dlg.exec():
+                form_data = dlg.get_data()
+                try:
+                    ComponentRepository.update(data["id"], **form_data)
+                    self.refresh_buildings()
+                except Exception as e:
+                    QMessageBox.critical(self, "错误", f"保存失败: {str(e)}")
+
+    def _on_delete_item(self, data: Dict[str, Any]):
+        if data["type"] == "building":
+            building = BuildingRepository.get_by_id(data["id"])
+            if not building:
+                return
+            reply = QMessageBox.question(
+                self, "确认删除",
+                f"确定要删除建筑「{building['name']}」吗？\n"
+                f"注意：该建筑下存在构件时将无法删除。",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+            try:
+                BuildingRepository.delete(data["id"])
+                self.current_building_id = None
+                self.current_component_id = None
+                self.refresh_buildings()
+                QMessageBox.information(self, "成功", "建筑已删除")
+            except ValueError as e:
+                QMessageBox.warning(self, "无法删除", str(e))
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"删除失败: {str(e)}")
+
+        elif data["type"] == "component":
+            component = ComponentRepository.get_by_id(data["id"])
+            if not component:
+                return
+            has_records = ComponentRepository.has_records(data["id"])
+            warn_msg = ""
+            if has_records:
+                warn_msg = "\n⚠ 该构件存在历史检测记录，将无法删除。"
+            reply = QMessageBox.question(
+                self, "确认删除",
+                f"确定要删除构件「{component['code']} - {component['name']}」吗？{warn_msg}",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+            try:
+                ComponentRepository.delete(data["id"])
+                self.current_component_id = None
+                self.refresh_buildings()
+                QMessageBox.information(self, "成功", "构件已删除")
+            except ValueError as e:
+                QMessageBox.warning(self, "无法删除", str(e))
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"删除失败: {str(e)}")
 
     def _on_add_building(self):
         dlg = BuildingDialog(self)
@@ -646,7 +739,6 @@ class MainWindow(QMainWindow):
 
     def _on_save_settings(self):
         SettingsRepository.set_moisture_threshold(self.spin_threshold.value())
-        SettingsRepository.set_consecutive_count(self.spin_consecutive.value())
         QMessageBox.information(self, "成功", "设置已保存")
         if self.current_component_id:
             self._load_component_detail()

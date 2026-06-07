@@ -180,25 +180,26 @@ def validate_csv_content(file_path: str, component_id: int,
             if is_valid or skip_errors:
                 measure_time = parse_measure_time(str(row_data["measure_time"]).strip())
                 position = str(row_data["measure_position"]).strip()
-                key = (format_measure_time(measure_time), position)
+                normalized_time = format_measure_time(measure_time)
+                key = normalized_time
 
                 if key in seen_keys:
                     result["error_rows"].append({
                         "row_num": idx,
                         "row_data": row,
-                        "errors": [f"第 {idx} 行: 检测时间和位置在CSV中重复"]
+                        "errors": [f"第 {idx} 行: 检测时间在CSV中重复（同一构件同一时间只能有一条记录）"]
                     })
                     result["duplicate_count"] += 1
                     continue
                 seen_keys.add(key)
 
                 if component_id and check_duplicate_time(
-                    component_id, format_measure_time(measure_time), position
+                    component_id, normalized_time
                 ):
                     result["error_rows"].append({
                         "row_num": idx,
                         "row_data": row,
-                        "errors": [f"第 {idx} 行: 该检测时间和位置的记录已存在于数据库"]
+                        "errors": [f"第 {idx} 行: 该检测时间的记录已存在于数据库（同一构件同一时间只能有一条记录）"]
                     })
                     result["duplicate_count"] += 1
                     continue

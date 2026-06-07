@@ -73,7 +73,7 @@ def init_db():
                 remark TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (component_id) REFERENCES components(id) ON DELETE RESTRICT,
-                UNIQUE(component_id, measure_time, measure_position)
+                UNIQUE(component_id, measure_time)
             )
         """)
 
@@ -297,12 +297,12 @@ class RecordRepository:
             return [row[0] for row in cursor.fetchall()]
 
     @staticmethod
-    def exists(component_id: int, measure_time: str, measure_position: str) -> bool:
+    def exists(component_id: int, measure_time: str, measure_position: str = None) -> bool:
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT COUNT(*) FROM records WHERE component_id=? AND measure_time=? AND measure_position=?",
-                (component_id, measure_time, measure_position)
+                "SELECT COUNT(*) FROM records WHERE component_id=? AND measure_time=?",
+                (component_id, measure_time)
             )
             return cursor.fetchone()[0] > 0
 

@@ -5,6 +5,7 @@ from app.db.database import SettingsRepository, RecordRepository
 
 MOISTURE_MIN = 0.0
 MOISTURE_MAX = 100.0
+CONSECUTIVE_HIGH_RISK_COUNT = 3
 
 TIME_FORMATS = [
     "%Y-%m-%d %H:%M:%S",
@@ -82,8 +83,8 @@ def validate_csv_row(row_data: Dict[str, Any], row_num: int,
 
 
 def check_duplicate_time(component_id: int, measure_time: str,
-                         measure_position: str, exclude_record_id: int = None) -> bool:
-    if RecordRepository.exists(component_id, measure_time, measure_position):
+                         exclude_record_id: int = None) -> bool:
+    if RecordRepository.exists(component_id, measure_time):
         if exclude_record_id:
             return False
         return True
@@ -93,58 +94,62 @@ def check_duplicate_time(component_id: int, measure_time: str,
 def detect_consecutive_high_risk(records: List[Dict[str, Any]],
                                  position: str = None) -> List[Dict[str, Any]]:
     threshold = SettingsRepository.get_moisture_threshold()
-    consecutive_n = SettingsRepository.get_consecutive_count()
+    consecutive_n = CONSECUTIVE_HIGH_RISK_COUNT
 
-    if position:
-        position_records = [r for r in records if r["measure_position"] == position]
-    else:
-        position_records = records
-
-    position_records.sort(key=lambda x: x["measure_time"])
+    position_groups: Dict[str, List[Dict]] = {}
+    for r in records:
+        pos = r["measure_position"]
+        if position and pos != position:
+            continue
+        if pos not in position_groups:
+            position_groups[pos] = []
+        position_groups[pos].append(r)
 
     high_risk_periods = []
-    consecutive_count = 0
-    start_idx = None
 
-    for i, record in enumerate(position_records):
-        if record["moisture"] > threshold:
-            if consecutive_count == 0:
-                start_idx = i
-            consecutive_count += 1
-            if consecutive_count >= consecutive_n:
-                period = {
-                    "start_time": position_records[start_idx]["measure_time"],
-                    "end_time": record["measure_time"],
-                    "count": consecutive_count,
-                    "position": record["measure_position"],
-                    "max_moisture": max(
-                        r["moisture"] for r in position_records[start_idx:i + 1]
-                    ),
-                    "avg_moisture": sum(
-                        r["moisture"] for r in position_records[start_idx:i + 1]
-                    ) / consecutive_count,
-                    "type": "连续超标"
-                }
-                if start_idx == i - consecutive_n + 1 or i == len(position_records) - 1:
+    for pos, pos_records in position_groups.items():
+        pos_records.sort(key=lambda x: x["measure_time"])
+
+        streak_start_idx = None
+        streak_count = 0
+
+        for i, record in enumerate(pos_records):
+            if record["moisture"] > threshold:
+                if streak_start_idx is None:
+                    streak_start_idx = i
+                streak_count += 1
+            else:
+                if streak_count >= consecutive_n and streak_start_idx is not None:
+                    streak_records = pos_records[streak_start_idx:i]
+                    period = {
+                        "start_time": streak_records[0]["measure_time"],
+                        "end_time": streak_records[-1]["measure_time"],
+                        "count": len(streak_records),
+                        "position": pos,
+                        "max_moisture": max(r["moisture"] for r in streak_records),
+                        "avg_moisture": round(
+                            sum(r["moisture"] for r in streak_records) / len(streak_records), 2
+                        ),
+                        "type": "连续超标"
+                    }
                     high_risk_periods.append(period)
-        else:
-            if consecutive_count >= consecutive_n:
-                period = {
-                    "start_time": position_records[start_idx]["measure_time"],
-                    "end_time": position_records[i - 1]["measure_time"],
-                    "count": consecutive_count,
-                    "position": position_records[start_idx]["measure_position"],
-                    "max_moisture": max(
-                        r["moisture"] for r in position_records[start_idx:i]
-                    ),
-                    "avg_moisture": sum(
-                        r["moisture"] for r in position_records[start_idx:i]
-                    ) / consecutive_count,
-                    "type": "连续超标"
-                }
-                high_risk_periods.append(period)
-            consecutive_count = 0
-            start_idx = None
+                streak_start_idx = None
+                streak_count = 0
+
+        if streak_count >= consecutive_n and streak_start_idx is not None:
+            streak_records = pos_records[streak_start_idx:]
+            period = {
+                "start_time": streak_records[0]["measure_time"],
+                "end_time": streak_records[-1]["measure_time"],
+                "count": len(streak_records),
+                "position": pos,
+                "max_moisture": max(r["moisture"] for r in streak_records),
+                "avg_moisture": round(
+                    sum(r["moisture"] for r in streak_records) / len(streak_records), 2
+                ),
+                "type": "连续超标"
+            }
+            high_risk_periods.append(period)
 
     return high_risk_periods
 
