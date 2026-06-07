@@ -531,3 +531,268 @@ class ChartWidget(QWidget):
 
         ax.set_title("病害状态分布", fontsize=13, fontweight="bold")
         self.canvas.draw()
+
+    def plot_resource_cost_pie(self, resource_stats: Dict[str, Any]):
+        self.canvas.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        by_type = resource_stats.get("by_type", {})
+        if not by_type:
+            ax.text(0.5, 0.5, "暂无数据", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=14)
+            self.canvas.draw()
+            return
+
+        labels = []
+        sizes = []
+        type_colors = {"材料": "#3498db", "人工": "#e74c3c", "设备": "#f39c12", "其他": "#95a5a6"}
+        colors = []
+        for rtype, data in by_type.items():
+            cost = data.get("cost", 0)
+            if cost > 0:
+                labels.append(f"{rtype}(¥{cost:,.0f})")
+                sizes.append(cost)
+                colors.append(type_colors.get(rtype, "#34495e"))
+
+        if not sizes:
+            ax.text(0.5, 0.5, "暂无资源成本数据", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=14)
+            self.canvas.draw()
+            return
+
+        explode = [0.03] * len(sizes)
+        wedges, texts, autotexts = ax.pie(
+            sizes, explode=explode, labels=labels, colors=colors,
+            autopct="%1.1f%%", startangle=90, shadow=False
+        )
+        for t in autotexts:
+            t.set_fontsize(10)
+            t.set_color("white")
+            t.set_fontweight("bold")
+
+        ax.set_title(f"维修资源成本分布 (总计: ¥{resource_stats.get('total_cost', 0):,.0f})",
+                     fontsize=13, fontweight="bold")
+        self.canvas.draw()
+
+    def plot_resource_by_building_bar(self, resource_stats: Dict[str, Any]):
+        self.canvas.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        by_building = resource_stats.get("by_building", {})
+        if not by_building:
+            ax.text(0.5, 0.5, "暂无数据", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=14)
+            self.canvas.draw()
+            return
+
+        buildings = list(by_building.keys())
+        costs = [by_building[b]["cost"] for b in buildings]
+        counts = [by_building[b]["count"] for b in buildings]
+
+        x = np.arange(len(buildings))
+        width = 0.35
+
+        ax.bar(x - width / 2, costs, width, label="成本(¥)", color="#e74c3c", alpha=0.85)
+        ax2 = ax.twinx()
+        ax2.bar(x + width / 2, counts, width, label="资源使用次数", color="#3498db", alpha=0.6)
+
+        ax.set_xlabel("建筑", fontsize=11)
+        ax.set_ylabel("成本 (¥)", fontsize=11, color="#e74c3c")
+        ax2.set_ylabel("使用次数", fontsize=11, color="#3498db")
+        ax.set_title("各建筑维修资源统计", fontsize=13, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(buildings, rotation=20, ha="right")
+
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, fontsize=9)
+        ax.grid(True, alpha=0.3, axis="y")
+        self.canvas.draw()
+
+    def plot_closed_loop_performance(self, perf_data: Dict[str, Any], group_by: str = "building"):
+        self.canvas.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        if group_by == "building":
+            detail = perf_data.get("buildings_detail", [])
+        else:
+            detail = perf_data.get("components_detail", [])
+
+        if not detail:
+            ax.text(0.5, 0.5, "暂无数据", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=14)
+            self.canvas.draw()
+            return
+
+        detail = detail[:15]
+        names = [d["name"][:10] for d in detail]
+        closed_rates = [d["closed_rate"] for d in detail]
+        cycle_days = [d["avg_cycle_days"] for d in detail]
+
+        x = np.arange(len(names))
+        colors = ["#2ecc71" if r >= 80 else "#f39c12" if r >= 50 else "#e74c3c"
+                  for r in closed_rates]
+
+        bars = ax.bar(x, closed_rates, color=colors, alpha=0.85, label="闭环率(%)")
+        ax2 = ax.twinx()
+        ax2.plot(x, cycle_days, "ro-", label="平均周期(天)", markersize=5)
+
+        for bar, val in zip(bars, closed_rates):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
+                    f"{val}%", ha="center", va="bottom", fontsize=9, fontweight="bold")
+
+        ax.set_xlabel(group_by == "building" and "建筑" or "构件", fontsize=11)
+        ax.set_ylabel("闭环率 (%)", fontsize=11)
+        ax2.set_ylabel("平均处理周期 (天)", fontsize=11, color="#e74c3c")
+        ax.set_title(f"按{group_by == 'building' and '建筑' or '构件'}的闭环绩效 (Top{len(names)})",
+                     fontsize=13, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(names, rotation=30, ha="right")
+        ax.axhline(y=80, color="#2ecc71", linestyle="--", alpha=0.5, label="优秀线(80%)")
+        ax.set_ylim(0, 110)
+
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, fontsize=9, loc="upper left")
+        ax.grid(True, alpha=0.3, axis="y")
+        self.canvas.draw()
+
+    def plot_effectiveness_comparison(self, effect_data: Dict[str, Any]):
+        self.canvas.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        by_type = effect_data.get("by_defect_type", {})
+        if not by_type:
+            ax.text(0.5, 0.5, "暂无效果评估数据", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=14)
+            self.canvas.draw()
+            return
+
+        types = list(by_type.keys())
+        avg_imp = [by_type[t]["avg_improvement"] for t in types]
+        counts = [by_type[t]["count"] for t in types]
+
+        x = np.arange(len(types))
+        colors = ["#2ecc71" if v >= 30 else "#f39c12" if v >= 15 else "#e74c3c"
+                  for v in avg_imp]
+
+        bars = ax.bar(x, avg_imp, color=colors, alpha=0.85, label="平均改善率(%)")
+        for bar, val, cnt in zip(bars, avg_imp, counts):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
+                    f"{val}%\n(n={cnt})", ha="center", va="bottom", fontsize=9)
+
+        ax.set_xlabel("病害类型", fontsize=11)
+        ax.set_ylabel("含水率改善率 (%)", fontsize=11)
+        ax.set_title("不同病害类型处置效果对比", fontsize=13, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(types, rotation=30, ha="right")
+        ax.axhline(y=30, color="#2ecc71", linestyle="--", alpha=0.5, label="良好(30%)")
+        ax.axhline(y=15, color="#f39c12", linestyle="--", alpha=0.5, label="及格(15%)")
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3, axis="y")
+        self.canvas.draw()
+
+    def plot_effect_distribution_pie(self, effect_data: Dict[str, Any]):
+        self.canvas.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        dist = effect_data.get("effect_distribution", {})
+        if not dist or sum(dist.values()) == 0:
+            ax.text(0.5, 0.5, "暂无评估数据", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=14)
+            self.canvas.draw()
+            return
+
+        effect_colors = {"优秀": "#2ecc71", "良好": "#3498db", "一般": "#f39c12", "较差": "#e74c3c"}
+        labels = []
+        sizes = []
+        colors = []
+        for level, count in dist.items():
+            if count > 0:
+                labels.append(f"{level}({count})")
+                sizes.append(count)
+                colors.append(effect_colors.get(level, "#95a5a6"))
+
+        explode = [0.05] * len(sizes)
+        wedges, texts, autotexts = ax.pie(
+            sizes, explode=explode, labels=labels, colors=colors,
+            autopct="%1.1f%%", startangle=90, shadow=False
+        )
+        for t in autotexts:
+            t.set_fontsize(11)
+            t.set_color("white")
+            t.set_fontweight("bold")
+
+        avg_imp = effect_data.get("overall_avg_improvement", 0)
+        ax.set_title(f"处置效果分布 (平均改善: {avg_imp}%)", fontsize=13, fontweight="bold")
+        self.canvas.draw()
+
+    def plot_recurrence_analysis(self, recurrence_data: Dict[str, Any]):
+        self.canvas.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        by_type = recurrence_data.get("by_type", {})
+        if not by_type:
+            ax.text(0.5, 0.5, "暂无复发数据", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=14)
+            self.canvas.draw()
+            return
+
+        types = list(by_type.keys())
+        counts = [by_type[t] for t in types]
+        type_colors = {"同一位置复发": "#e74c3c", "同类病害": "#f39c12",
+                       "关联构件": "#3498db", "其他": "#95a5a6"}
+        colors = [type_colors.get(t, "#34495e") for t in types]
+
+        bars = ax.bar(types, counts, color=colors, alpha=0.85)
+        for bar, val in zip(bars, counts):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                    str(val), ha="center", va="bottom", fontsize=11, fontweight="bold")
+
+        avg_days = recurrence_data.get("avg_days_between", 0)
+        total = recurrence_data.get("total_recurrences", 0)
+        ax.set_xlabel("复发类型", fontsize=11)
+        ax.set_ylabel("复发次数", fontsize=11)
+        ax.set_title(f"病害复发分析 (总计{total}次, 平均间隔{avg_days}天)",
+                     fontsize=13, fontweight="bold")
+        ax.grid(True, alpha=0.3, axis="y")
+        self.canvas.draw()
+
+    def plot_priority_distribution(self, sorted_defects: List[Dict[str, Any]]):
+        self.canvas.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        if not sorted_defects:
+            ax.text(0.5, 0.5, "暂无病害数据", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=14)
+            self.canvas.draw()
+            return
+
+        levels = {"紧急": 0, "高": 0, "中": 0, "低": 0}
+        for d in sorted_defects:
+            lvl = d.get("priority_level", "中")
+            if lvl in levels:
+                levels[lvl] += 1
+
+        level_colors = {"紧急": "#e74c3c", "高": "#f39c12", "中": "#3498db", "低": "#2ecc71"}
+        labels = []
+        sizes = []
+        colors = []
+        for lvl in ["紧急", "高", "中", "低"]:
+            if levels[lvl] > 0:
+                labels.append(f"{lvl}({levels[lvl]})")
+                sizes.append(levels[lvl])
+                colors.append(level_colors[lvl])
+
+        if sizes:
+            explode = [0.05] * len(sizes)
+            wedges, texts, autotexts = ax.pie(
+                sizes, explode=explode, labels=labels, colors=colors,
+                autopct="%1.1f%%", startangle=90
+            )
+            for t in autotexts:
+                t.set_fontsize(11)
+                t.set_color("white")
+                t.set_fontweight("bold")
+            ax.set_title("病害优先级分布", fontsize=13, fontweight="bold")
+        self.canvas.draw()

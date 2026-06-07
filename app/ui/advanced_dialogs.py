@@ -16,9 +16,11 @@ from app.db.database import (
     AnomalyReviewRepository, SettingsRepository, ReportArchiveRepository,
     DefectRepository, WorkOrderRepository, RectificationTrackingRepository,
     AcceptanceRecordRepository, EffectivenessEvaluationRepository,
-    DefectStatusLogRepository,
+    DefectStatusLogRepository, UserRepository, RoleRepository,
+    MaintenanceResourceRepository, DefectRecurrenceRepository,
     DEFECT_TYPES, DEFECT_SEVERITIES, DEFECT_STATUSES,
-    WORK_ORDER_STATUSES, PRIORITIES, ACCEPT_RESULTS, EFFECT_LEVELS
+    WORK_ORDER_STATUSES, PRIORITIES, ACCEPT_RESULTS, EFFECT_LEVELS,
+    USER_ROLES, PERMISSIONS, RESOURCE_TYPES, RECURRENCE_TYPES
 )
 from app.logic.advanced_analytics import get_all_components_for_comparison
 
@@ -1292,3 +1294,416 @@ class DefectDetailDialog(QDialog):
             self.log_table.setItem(row, 2, to_item)
             self.log_table.setItem(row, 3, QTableWidgetItem(log.get("operator", "") or "-"))
             self.log_table.setItem(row, 4, QTableWidgetItem(log.get("change_note", "") or "-"))
+
+
+class UserDialog(QDialog):
+    def __init__(self, parent=None, user: Optional[Dict[str, Any]] = None):
+        super().__init__(parent)
+        self.user = user
+        self.setWindowTitle("编辑用户" if user else "新增用户")
+        self.resize(480, 400)
+        self._init_ui()
+        if user:
+            self._load_data(user)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.username_edit = QLineEdit()
+        self.username_edit.setPlaceholderText("登录用户名，唯一")
+        form.addRow("用户名 *:", self.username_edit)
+
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        self.password_edit.setPlaceholderText("至少6位")
+        form.addRow("密码 *:", self.password_edit)
+
+        self.realname_edit = QLineEdit()
+        form.addRow("真实姓名 *:", self.realname_edit)
+
+        self.email_edit = QLineEdit()
+        self.email_edit.setPlaceholderText("可选")
+        form.addRow("邮箱:", self.email_edit)
+
+        self.phone_edit = QLineEdit()
+        self.phone_edit.setPlaceholderText("可选")
+        form.addRow("电话:", self.phone_edit)
+
+        self.status_combo = QComboBox()
+        self.status_combo.addItems(["active", "inactive"])
+        form.addRow("状态:", self.status_combo)
+
+        layout.addLayout(form)
+
+        role_group = QGroupBox("分配角色")
+        role_layout = QVBoxLayout(role_group)
+        self.role_list = QListWidget()
+        self.role_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        for role in RoleRepository.get_all():
+            item = QListWidgetItem(f"{role['name']} - {role.get('description', '')}")
+            item.setData(Qt.UserRole, role["id"])
+            self.role_list.addItem(item)
+        role_layout.addWidget(self.role_list)
+        layout.addWidget(role_group)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _load_data(self, user: Dict[str, Any]):
+        self.username_edit.setText(user.get("username", ""))
+        self.username_edit.setReadOnly(True)
+        self.realname_edit.setText(user.get("real_name", ""))
+        self.email_edit.setText(user.get("email", "") or "")
+        self.phone_edit.setText(user.get("phone", "") or "")
+        status = user.get("status", "active")
+        idx = self.status_combo.findText(status)
+        if idx >= 0:
+            self.status_combo.setCurrentIndex(idx)
+
+        user_roles = UserRepository.get_roles(user["id"])
+        role_ids = [r["id"] for r in user_roles]
+        for i in range(self.role_list.count()):
+            item = self.role_list.item(i)
+            if item.data(Qt.UserRole) in role_ids:
+                item.setSelected(True)
+
+    def _on_accept(self):
+        username = self.username_edit.text().strip()
+        password = self.password_edit.text().strip()
+        real_name = self.realname_edit.text().strip()
+        if not username:
+            QMessageBox.warning(self, "提示", "请输入用户名")
+            return
+        if not self.user and not password:
+            QMessageBox.warning(self, "提示", "请输入密码")
+            return
+        if not real_name:
+            QMessageBox.warning(self, "提示", "请输入真实姓名")
+            return
+        self.accept()
+
+    def get_data(self) -> Dict[str, Any]:
+        selected_roles = []
+        for item in self.role_list.selectedItems():
+            selected_roles.append(item.data(Qt.UserRole))
+        return {
+            "username": self.username_edit.text().strip(),
+            "password_hash": self.password_edit.text().strip(),
+            "real_name": self.realname_edit.text().strip(),
+            "email": self.email_edit.text().strip(),
+            "phone": self.phone_edit.text().strip(),
+            "status": self.status_combo.currentText(),
+            "role_ids": selected_roles
+        }
+
+
+class ResourceDialog(QDialog):
+    def __init__(self, parent=None, work_order_id: int = None,
+                 resource: Optional[Dict[str, Any]] = None):
+        super().__init__(parent)
+        self.work_order_id = work_order_id
+        self.resource = resource
+        self.setWindowTitle("编辑维修资源" if resource else "新增维修资源")
+        self.resize(450, 380)
+        self._init_ui()
+        if resource:
+            self._load_data(resource)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(RESOURCE_TYPES)
+        form.addRow("资源类型 *:", self.type_combo)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("如：防腐木材、人工工时、烘干设备等")
+        form.addRow("资源名称 *:", self.name_edit)
+
+        self.quantity_spin = QDoubleSpinBox()
+        self.quantity_spin.setRange(0, 100000)
+        self.quantity_spin.setDecimals(2)
+        self.quantity_spin.setSingleStep(1)
+        form.addRow("数量:", self.quantity_spin)
+
+        self.unit_edit = QLineEdit()
+        self.unit_edit.setPlaceholderText("如：kg、m、小时、台等")
+        form.addRow("单位:", self.unit_edit)
+
+        self.price_spin = QDoubleSpinBox()
+        self.price_spin.setRange(0, 1000000)
+        self.price_spin.setDecimals(2)
+        self.price_spin.setPrefix("¥ ")
+        self.price_spin.setSingleStep(10)
+        form.addRow("单价:", self.price_spin)
+
+        self.usage_date = QDateEdit()
+        self.usage_date.setCalendarPopup(True)
+        self.usage_date.setDate(QDate.currentDate())
+        self.usage_date.setDisplayFormat("yyyy-MM-dd")
+        form.addRow("使用日期:", self.usage_date)
+
+        self.remark_edit = QTextEdit()
+        self.remark_edit.setPlaceholderText("备注说明...")
+        self.remark_edit.setMaximumHeight(60)
+        form.addRow("备注:", self.remark_edit)
+
+        layout.addLayout(form)
+
+        self.cost_label = QLabel("预估费用: ¥ 0.00")
+        self.cost_label.setFont(QFont("", 11, QFont.Bold))
+        self.cost_label.setStyleSheet("color: #e74c3c; padding: 8px; background: #fef5e7; border-radius: 4px;")
+        layout.addWidget(self.cost_label)
+
+        self.quantity_spin.valueChanged.connect(self._update_cost)
+        self.price_spin.valueChanged.connect(self._update_cost)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _update_cost(self):
+        cost = self.quantity_spin.value() * self.price_spin.value()
+        self.cost_label.setText(f"预估费用: ¥ {cost:,.2f}")
+
+    def _load_data(self, resource: Dict[str, Any]):
+        idx = self.type_combo.findText(resource.get("resource_type", ""))
+        if idx >= 0:
+            self.type_combo.setCurrentIndex(idx)
+        self.name_edit.setText(resource.get("resource_name", ""))
+        self.quantity_spin.setValue(float(resource.get("quantity", 0) or 0))
+        self.unit_edit.setText(resource.get("unit", "") or "")
+        self.price_spin.setValue(float(resource.get("unit_price", 0) or 0))
+        if resource.get("usage_date"):
+            try:
+                dt = QDate.fromString(resource["usage_date"][:10], "yyyy-MM-dd")
+                if dt.isValid():
+                    self.usage_date.setDate(dt)
+            except Exception:
+                pass
+        self.remark_edit.setPlainText(resource.get("remark", "") or "")
+        self._update_cost()
+
+    def _on_accept(self):
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "提示", "请输入资源名称")
+            return
+        self.accept()
+
+    def get_data(self) -> Dict[str, Any]:
+        return {
+            "work_order_id": self.work_order_id,
+            "resource_type": self.type_combo.currentText(),
+            "resource_name": self.name_edit.text().strip(),
+            "quantity": self.quantity_spin.value(),
+            "unit": self.unit_edit.text().strip(),
+            "unit_price": self.price_spin.value(),
+            "usage_date": self.usage_date.date().toString("yyyy-MM-dd"),
+            "remark": self.remark_edit.toPlainText().strip()
+        }
+
+
+class DefectRecurrenceDialog(QDialog):
+    def __init__(self, parent=None, original_defect: Dict[str, Any] = None,
+                 recurrence_defect: Dict[str, Any] = None):
+        super().__init__(parent)
+        self.original_defect = original_defect
+        self.recurrence_defect = recurrence_defect
+        self.setWindowTitle("标记病害复发关联")
+        self.resize(520, 450)
+        self._init_ui()
+        self._load_defaults()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        info_group = QGroupBox("病害信息")
+        info_layout = QFormLayout(info_group)
+        self.original_label = QLabel("-")
+        self.original_label.setWordWrap(True)
+        info_layout.addRow("原发病害:", self.original_label)
+        self.recurrence_label = QLabel("-")
+        self.recurrence_label.setWordWrap(True)
+        info_layout.addRow("复发病害:", self.recurrence_label)
+        layout.addWidget(info_group)
+
+        form_group = QGroupBox("关联信息")
+        form = QFormLayout(form_group)
+
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(RECURRENCE_TYPES)
+        form.addRow("复发类型 *:", self.type_combo)
+
+        self.days_spin = QSpinBox()
+        self.days_spin.setRange(0, 3650)
+        self.days_spin.setSuffix(" 天")
+        form.addRow("间隔天数:", self.days_spin)
+
+        self.cause_edit = QTextEdit()
+        self.cause_edit.setPlaceholderText("分析复发的根本原因...")
+        self.cause_edit.setMaximumHeight(80)
+        form.addRow("根本原因:", self.cause_edit)
+
+        self.remark_edit = QTextEdit()
+        self.remark_edit.setPlaceholderText("备注说明...")
+        self.remark_edit.setMaximumHeight(60)
+        form.addRow("备注:", self.remark_edit)
+
+        layout.addWidget(form_group)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _load_defaults(self):
+        if self.original_defect:
+            self.original_label.setText(
+                f"[{self.original_defect.get('defect_type', '')}] "
+                f"{self.original_defect.get('description', '')[:50]}"
+            )
+        if self.recurrence_defect:
+            self.recurrence_label.setText(
+                f"[{self.recurrence_defect.get('defect_type', '')}] "
+                f"{self.recurrence_defect.get('description', '')[:50]}"
+            )
+            try:
+                if self.original_defect and self.recurrence_defect:
+                    d1 = datetime.fromisoformat(self.original_defect["discovery_date"][:10])
+                    d2 = datetime.fromisoformat(self.recurrence_defect["discovery_date"][:10])
+                    days = (d2 - d1).days
+                    if days > 0:
+                        self.days_spin.setValue(days)
+                    loc1 = self.original_defect.get("location_detail", "")
+                    loc2 = self.recurrence_defect.get("location_detail", "")
+                    if loc1 and loc2 and loc1 == loc2:
+                        idx = self.type_combo.findText("同一位置复发")
+                        if idx >= 0:
+                            self.type_combo.setCurrentIndex(idx)
+                    elif self.original_defect.get("defect_type") == self.recurrence_defect.get("defect_type"):
+                        idx = self.type_combo.findText("同类病害")
+                        if idx >= 0:
+                            self.type_combo.setCurrentIndex(idx)
+            except Exception:
+                pass
+
+    def _on_accept(self):
+        if not self.original_defect or not self.recurrence_defect:
+            QMessageBox.warning(self, "提示", "缺少病害信息")
+            return
+        self.accept()
+
+    def get_data(self) -> Dict[str, Any]:
+        return {
+            "original_defect_id": self.original_defect["id"] if self.original_defect else None,
+            "recurrence_defect_id": self.recurrence_defect["id"] if self.recurrence_defect else None,
+            "recurrence_type": self.type_combo.currentText(),
+            "days_between": self.days_spin.value(),
+            "root_cause": self.cause_edit.toPlainText().strip(),
+            "remark": self.remark_edit.toPlainText().strip()
+        }
+
+
+class RolePermissionDialog(QDialog):
+    def __init__(self, parent=None, role: Dict[str, Any] = None):
+        super().__init__(parent)
+        self.role = role
+        self.setWindowTitle(f"角色权限管理 - {role.get('name', '')}" if role else "角色权限管理")
+        self.resize(600, 500)
+        self._init_ui()
+        if role:
+            self._load_permissions()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        info = QLabel(f"请勾选角色「{self.role.get('name', '') if self.role else ''}」的权限：")
+        info.setFont(QFont("", 11))
+        layout.addWidget(info)
+
+        self.perm_list = QListWidget()
+        self.perm_list.setSelectionMode(QAbstractItemView.NoSelection)
+        categories = {
+            "建筑管理": ["building:create", "building:edit", "building:delete", "building:view"],
+            "构件管理": ["component:create", "component:edit", "component:delete", "component:view"],
+            "检测记录": ["record:create", "record:edit", "record:delete", "record:view"],
+            "病害管理": ["defect:create", "defect:edit", "defect:delete", "defect:view"],
+            "工单管理": ["workorder:create", "workorder:edit", "workorder:delete", "workorder:view"],
+            "验收评估": ["acceptance:create", "acceptance:view", "evaluation:create", "evaluation:view"],
+            "报告归档": ["report:export", "report:view"],
+            "系统管理": ["user:manage", "role:manage", "settings:manage"]
+        }
+        perm_names = {
+            "building:create": "新增建筑", "building:edit": "编辑建筑",
+            "building:delete": "删除建筑", "building:view": "查看建筑",
+            "component:create": "新增构件", "component:edit": "编辑构件",
+            "component:delete": "删除构件", "component:view": "查看构件",
+            "record:create": "录入记录", "record:edit": "编辑记录",
+            "record:delete": "删除记录", "record:view": "查看记录",
+            "defect:create": "登记病害", "defect:edit": "编辑病害",
+            "defect:delete": "删除病害", "defect:view": "查看病害",
+            "workorder:create": "创建工单", "workorder:edit": "编辑工单",
+            "workorder:delete": "删除工单", "workorder:view": "查看工单",
+            "acceptance:create": "验收记录", "acceptance:view": "查看验收",
+            "evaluation:create": "效果评估", "evaluation:view": "查看评估",
+            "report:export": "导出报告", "report:view": "查看报告",
+            "user:manage": "用户管理", "role:manage": "角色管理",
+            "settings:manage": "系统设置"
+        }
+        for cat, perms in categories.items():
+            cat_item = QListWidgetItem(f"=== {cat} ===")
+            cat_item.setFlags(Qt.NoItemFlags)
+            cat_item.setFont(QFont("", 10, QFont.Bold))
+            self.perm_list.addItem(cat_item)
+            for p in perms:
+                item = QListWidgetItem(f"  {perm_names.get(p, p)}")
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Unchecked)
+                item.setData(Qt.UserRole, p)
+                self.perm_list.addItem(item)
+        layout.addWidget(self.perm_list)
+
+        btn_row = QHBoxLayout()
+        self.btn_select_all = QPushButton("全选")
+        self.btn_select_all.clicked.connect(lambda: self._set_all(True))
+        btn_row.addWidget(self.btn_select_all)
+        self.btn_clear_all = QPushButton("全不选")
+        self.btn_clear_all.clicked.connect(lambda: self._set_all(False))
+        btn_row.addWidget(self.btn_clear_all)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _set_all(self, checked: bool):
+        state = Qt.Checked if checked else Qt.Unchecked
+        for i in range(self.perm_list.count()):
+            item = self.perm_list.item(i)
+            if item.flags() & Qt.ItemIsUserCheckable:
+                item.setCheckState(state)
+
+    def _load_permissions(self):
+        if not self.role:
+            return
+        perms = RoleRepository.get_permissions(self.role["id"])
+        for i in range(self.perm_list.count()):
+            item = self.perm_list.item(i)
+            if item.flags() & Qt.ItemIsUserCheckable:
+                if item.data(Qt.UserRole) in perms:
+                    item.setCheckState(Qt.Checked)
+
+    def get_selected_permissions(self) -> List[str]:
+        result = []
+        for i in range(self.perm_list.count()):
+            item = self.perm_list.item(i)
+            if (item.flags() & Qt.ItemIsUserCheckable) and item.checkState() == Qt.Checked:
+                result.append(item.data(Qt.UserRole))
+        return result

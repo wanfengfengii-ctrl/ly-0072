@@ -290,6 +290,141 @@ def init_db():
             ("default_priority", "中")
         )
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                real_name TEXT NOT NULL,
+                email TEXT,
+                phone TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS roles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_roles (
+                user_id INTEGER NOT NULL,
+                role_id INTEGER NOT NULL,
+                assigned_at TEXT NOT NULL,
+                assigned_by INTEGER,
+                PRIMARY KEY (user_id, role_id),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS role_permissions (
+                role_id INTEGER NOT NULL,
+                permission TEXT NOT NULL,
+                PRIMARY KEY (role_id, permission),
+                FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS maintenance_resources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                work_order_id INTEGER NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_name TEXT NOT NULL,
+                quantity REAL NOT NULL DEFAULT 0,
+                unit TEXT,
+                unit_price REAL,
+                total_cost REAL,
+                usage_date TEXT,
+                remark TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (work_order_id) REFERENCES work_orders(id) ON DELETE CASCADE
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS defect_recurrences (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_defect_id INTEGER NOT NULL,
+                recurrence_defect_id INTEGER NOT NULL,
+                recurrence_type TEXT NOT NULL,
+                days_between INTEGER,
+                root_cause TEXT,
+                remark TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (original_defect_id) REFERENCES defects(id) ON DELETE CASCADE,
+                FOREIGN KEY (recurrence_defect_id) REFERENCES defects(id) ON DELETE CASCADE
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS assignments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_type TEXT NOT NULL,
+                target_id INTEGER NOT NULL,
+                role_id INTEGER,
+                user_id INTEGER,
+                assigned_by INTEGER,
+                assigned_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                completed_at TEXT,
+                note TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        now = datetime.now().isoformat()
+        cursor.execute(
+            "INSERT OR IGNORE INTO users (username, password_hash, real_name, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("admin", "admin123", "系统管理员", "active", now, now)
+        )
+        cursor.execute(
+            "INSERT OR IGNORE INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("管理员", "系统管理员，拥有全部权限", now, now)
+        )
+        cursor.execute(
+            "INSERT OR IGNORE INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("检测员", "负责检测数据录入、异常复核", now, now)
+        )
+        cursor.execute(
+            "INSERT OR IGNORE INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("维修员", "负责病害处置、维修执行、整改跟踪", now, now)
+        )
+        cursor.execute(
+            "INSERT OR IGNORE INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("验收员", "负责维修验收、效果评估", now, now)
+        )
+        cursor.execute(
+            "INSERT OR IGNORE INTO roles (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("查看者", "仅有查看权限", now, now)
+        )
+
+        try:
+            cursor.execute("SELECT id FROM roles WHERE name='管理员'")
+            admin_role_id = cursor.fetchone()
+            if admin_role_id:
+                cursor.execute("SELECT id FROM users WHERE username='admin'")
+                admin_user_id = cursor.fetchone()
+                if admin_user_id:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO user_roles (user_id, role_id, assigned_at) VALUES (?, ?, ?)",
+                        (admin_user_id[0], admin_role_id[0], now)
+                    )
+        except Exception:
+            pass
+
 
 class BuildingRepository:
     @staticmethod
@@ -1500,4 +1635,529 @@ class DefectStatusLogRepository:
                 "SELECT * FROM defect_status_logs WHERE defect_id=? ORDER BY created_at ASC",
                 (defect_id,)
             )
+            return [dict(row) for row in cursor.fetchall()]
+
+
+USER_ROLES = ["管理员", "检测员", "维修员", "验收员", "查看者"]
+
+PERMISSIONS = [
+    "building:create", "building:edit", "building:delete", "building:view",
+    "component:create", "component:edit", "component:delete", "component:view",
+    "record:create", "record:edit", "record:delete", "record:view",
+    "defect:create", "defect:edit", "defect:delete", "defect:view",
+    "workorder:create", "workorder:edit", "workorder:delete", "workorder:view",
+    "acceptance:create", "acceptance:view",
+    "evaluation:create", "evaluation:view",
+    "report:export", "report:view",
+    "user:manage", "role:manage",
+    "settings:manage"
+]
+
+RESOURCE_TYPES = ["材料", "人工", "设备", "其他"]
+
+RECURRENCE_TYPES = ["同一位置复发", "同类病害", "关联构件", "其他"]
+
+
+class UserRepository:
+    @staticmethod
+    def create(username: str, password_hash: str, real_name: str,
+               email: str = "", phone: str = "", status: str = "active") -> int:
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO users (username, password_hash, real_name, email, phone, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (username, password_hash, real_name, email, phone, status, now, now)
+            )
+            return cursor.lastrowid
+
+    @staticmethod
+    def update(user_id: int, **kwargs) -> bool:
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            fields = []
+            values = []
+            for k, v in kwargs.items():
+                if v is not None:
+                    fields.append(f"{k}=?")
+                    values.append(v)
+            if not fields:
+                return False
+            fields.append("updated_at=?")
+            values.append(now)
+            values.append(user_id)
+            cursor.execute(f"UPDATE users SET {', '.join(fields)} WHERE id=?", values)
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def delete(user_id: int) -> bool:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM users WHERE id=?", (user_id,))
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def get_all(status: str = None) -> List[Dict[str, Any]]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            if status:
+                cursor.execute("SELECT * FROM users WHERE status=? ORDER BY username", (status,))
+            else:
+                cursor.execute("SELECT * FROM users ORDER BY username")
+            return [dict(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def get_by_id(user_id: int) -> Optional[Dict[str, Any]]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    @staticmethod
+    def get_by_username(username: str) -> Optional[Dict[str, Any]]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE username=?", (username,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    @staticmethod
+    def get_roles(user_id: int) -> List[Dict[str, Any]]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT r.* FROM roles r
+                INNER JOIN user_roles ur ON r.id = ur.role_id
+                WHERE ur.user_id=?
+                ORDER BY r.name
+            """, (user_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def get_permissions(user_id: int) -> List[str]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT rp.permission FROM role_permissions rp
+                INNER JOIN user_roles ur ON rp.role_id = ur.role_id
+                WHERE ur.user_id=?
+            """, (user_id,))
+            return [row[0] for row in cursor.fetchall()]
+
+    @staticmethod
+    def has_permission(user_id: int, permission: str) -> bool:
+        perms = UserRepository.get_permissions(user_id)
+        return permission in perms or "admin" in [r["name"].lower() for r in UserRepository.get_roles(user_id)]
+
+    @staticmethod
+    def assign_role(user_id: int, role_id: int, assigned_by: int = None) -> bool:
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR IGNORE INTO user_roles (user_id, role_id, assigned_at, assigned_by) "
+                "VALUES (?, ?, ?, ?)",
+                (user_id, role_id, now, assigned_by)
+            )
+            return True
+
+    @staticmethod
+    def remove_role(user_id: int, role_id: int) -> bool:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM user_roles WHERE user_id=? AND role_id=?",
+                (user_id, role_id)
+            )
+            return cursor.rowcount > 0
+
+
+class RoleRepository:
+    @staticmethod
+    def create(name: str, description: str = "") -> int:
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR IGNORE INTO roles (name, description, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (name, description, now, now)
+            )
+            return cursor.lastrowid
+
+    @staticmethod
+    def update(role_id: int, name: str = "", description: str = "") -> bool:
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            fields = []
+            values = []
+            if name:
+                fields.append("name=?")
+                values.append(name)
+            if description is not None:
+                fields.append("description=?")
+                values.append(description)
+            if not fields:
+                return False
+            fields.append("updated_at=?")
+            values.append(now)
+            values.append(role_id)
+            cursor.execute(f"UPDATE roles SET {', '.join(fields)} WHERE id=?", values)
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def delete(role_id: int) -> bool:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM roles WHERE id=?", (role_id,))
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def get_all() -> List[Dict[str, Any]]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM roles ORDER BY name")
+            return [dict(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def get_by_id(role_id: int) -> Optional[Dict[str, Any]]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM roles WHERE id=?", (role_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    @staticmethod
+    def get_permissions(role_id: int) -> List[str]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT permission FROM role_permissions WHERE role_id=?",
+                (role_id,)
+            )
+            return [row[0] for row in cursor.fetchall()]
+
+    @staticmethod
+    def add_permission(role_id: int, permission: str) -> bool:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES (?, ?)",
+                (role_id, permission)
+            )
+            return True
+
+    @staticmethod
+    def remove_permission(role_id: int, permission: str) -> bool:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM role_permissions WHERE role_id=? AND permission=?",
+                (role_id, permission)
+            )
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def get_users(role_id: int) -> List[Dict[str, Any]]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT u.* FROM users u
+                INNER JOIN user_roles ur ON u.id = ur.user_id
+                WHERE ur.role_id=?
+                ORDER BY u.username
+            """, (role_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
+
+class MaintenanceResourceRepository:
+    @staticmethod
+    def create(work_order_id: int, resource_type: str, resource_name: str,
+               quantity: float = 0, unit: str = "", unit_price: float = None,
+               usage_date: str = "", remark: str = "") -> int:
+        now = datetime.now().isoformat()
+        total_cost = None
+        if unit_price is not None and quantity is not None:
+            total_cost = round(quantity * unit_price, 2)
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO maintenance_resources (work_order_id, resource_type, resource_name,
+                   quantity, unit, unit_price, total_cost, usage_date, remark, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (work_order_id, resource_type, resource_name, quantity, unit,
+                 unit_price, total_cost, usage_date, remark, now)
+            )
+            return cursor.lastrowid
+
+    @staticmethod
+    def delete(resource_id: int) -> bool:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM maintenance_resources WHERE id=?", (resource_id,))
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def get_by_work_order(work_order_id: int) -> List[Dict[str, Any]]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM maintenance_resources WHERE work_order_id=? ORDER BY resource_type, resource_name",
+                (work_order_id,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def get_statistics(building_id: int = None, start_date: str = None, end_date: str = None) -> Dict[str, Any]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            sql = """
+                SELECT mr.*, w.order_no, w.title, w.status as wo_status,
+                d.id as defect_id, d.defect_type, d.severity,
+                c.id as component_id, c.code as component_code, c.name as component_name,
+                b.id as building_id, b.name as building_name
+                FROM maintenance_resources mr
+                LEFT JOIN work_orders w ON mr.work_order_id = w.id
+                LEFT JOIN defects d ON w.defect_id = d.id
+                LEFT JOIN components c ON d.component_id = c.id
+                LEFT JOIN buildings b ON c.building_id = b.id
+            """
+            conditions = []
+            params = []
+            if building_id:
+                conditions.append("b.id=?")
+                params.append(building_id)
+            if start_date:
+                conditions.append("mr.usage_date>=?")
+                params.append(start_date)
+            if end_date:
+                conditions.append("mr.usage_date<=?")
+                params.append(end_date)
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
+            cursor.execute(sql, params)
+            resources = [dict(row) for row in cursor.fetchall()]
+
+        stats: Dict[str, Any] = {
+            "total_resources": len(resources),
+            "total_cost": 0.0,
+            "by_type": {},
+            "by_building": {},
+            "by_defect_type": {},
+            "resources": resources
+        }
+
+        for r in resources:
+            if r.get("total_cost"):
+                stats["total_cost"] += r["total_cost"]
+            rtype = r.get("resource_type", "其他")
+            if rtype not in stats["by_type"]:
+                stats["by_type"][rtype] = {"count": 0, "cost": 0.0, "items": []}
+            stats["by_type"][rtype]["count"] += 1
+            if r.get("total_cost"):
+                stats["by_type"][rtype]["cost"] += r["total_cost"]
+            stats["by_type"][rtype]["items"].append(r)
+
+            bname = r.get("building_name", "未知")
+            if bname not in stats["by_building"]:
+                stats["by_building"][bname] = {"count": 0, "cost": 0.0}
+            stats["by_building"][bname]["count"] += 1
+            if r.get("total_cost"):
+                stats["by_building"][bname]["cost"] += r["total_cost"]
+
+            dtype = r.get("defect_type", "其他")
+            if dtype not in stats["by_defect_type"]:
+                stats["by_defect_type"][dtype] = {"count": 0, "cost": 0.0}
+            stats["by_defect_type"][dtype]["count"] += 1
+            if r.get("total_cost"):
+                stats["by_defect_type"][dtype]["cost"] += r["total_cost"]
+
+        stats["total_cost"] = round(stats["total_cost"], 2)
+        for k in stats["by_type"]:
+            stats["by_type"][k]["cost"] = round(stats["by_type"][k]["cost"], 2)
+        for k in stats["by_building"]:
+            stats["by_building"][k]["cost"] = round(stats["by_building"][k]["cost"], 2)
+        for k in stats["by_defect_type"]:
+            stats["by_defect_type"][k]["cost"] = round(stats["by_defect_type"][k]["cost"], 2)
+
+        return stats
+
+
+class DefectRecurrenceRepository:
+    @staticmethod
+    def create(original_defect_id: int, recurrence_defect_id: int,
+               recurrence_type: str, days_between: int = None,
+               root_cause: str = "", remark: str = "") -> int:
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO defect_recurrences (original_defect_id, recurrence_defect_id,
+                   recurrence_type, days_between, root_cause, remark, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (original_defect_id, recurrence_defect_id, recurrence_type,
+                 days_between, root_cause, remark, now)
+            )
+            return cursor.lastrowid
+
+    @staticmethod
+    def get_by_defect(defect_id: int) -> List[Dict[str, Any]]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT dr.*, od.defect_type as original_type, od.description as original_desc,
+                od.severity as original_severity, od.discovery_date as original_date,
+                rd.defect_type as recurrence_type_detail, rd.description as recurrence_desc,
+                rd.severity as recurrence_severity, rd.discovery_date as recurrence_date,
+                c.code as component_code, c.name as component_name,
+                b.name as building_name
+                FROM defect_recurrences dr
+                LEFT JOIN defects od ON dr.original_defect_id = od.id
+                LEFT JOIN defects rd ON dr.recurrence_defect_id = rd.id
+                LEFT JOIN components c ON od.component_id = c.id
+                LEFT JOIN buildings b ON c.building_id = b.id
+                WHERE dr.original_defect_id=? OR dr.recurrence_defect_id=?
+                ORDER BY dr.created_at DESC
+            """, (defect_id, defect_id))
+            return [dict(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def get_analysis(building_id: int = None, component_id: int = None) -> Dict[str, Any]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            sql = """
+                SELECT dr.*, od.defect_type, od.component_id,
+                c.code as component_code, c.name as component_name,
+                b.id as building_id, b.name as building_name
+                FROM defect_recurrences dr
+                LEFT JOIN defects od ON dr.original_defect_id = od.id
+                LEFT JOIN components c ON od.component_id = c.id
+                LEFT JOIN buildings b ON c.building_id = b.id
+            """
+            conditions = []
+            params = []
+            if building_id:
+                conditions.append("b.id=?")
+                params.append(building_id)
+            if component_id:
+                conditions.append("c.id=?")
+                params.append(component_id)
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
+            cursor.execute(sql, params)
+            recurrences = [dict(row) for row in cursor.fetchall()]
+
+        stats: Dict[str, Any] = {
+            "total_recurrences": len(recurrences),
+            "by_type": {},
+            "by_building": {},
+            "by_component": {},
+            "avg_days_between": 0,
+            "recurrences": recurrences
+        }
+
+        all_days = []
+        for r in recurrences:
+            rtype = r.get("recurrence_type", "其他")
+            if rtype not in stats["by_type"]:
+                stats["by_type"][rtype] = 0
+            stats["by_type"][rtype] += 1
+
+            bname = r.get("building_name", "未知")
+            if bname not in stats["by_building"]:
+                stats["by_building"][bname] = 0
+            stats["by_building"][bname] += 1
+
+            cname = f"{r.get('component_code', '')} - {r.get('component_name', '')}"
+            if cname not in stats["by_component"]:
+                stats["by_component"][cname] = 0
+            stats["by_component"][cname] += 1
+
+            if r.get("days_between") is not None:
+                all_days.append(r["days_between"])
+
+        if all_days:
+            stats["avg_days_between"] = round(sum(all_days) / len(all_days), 1)
+
+        return stats
+
+
+class AssignmentRepository:
+    @staticmethod
+    def create(target_type: str, target_id: int, role_id: int = None,
+               user_id: int = None, assigned_by: int = None,
+               status: str = "pending", note: str = "") -> int:
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO assignments (target_type, target_id, role_id, user_id,
+                   assigned_by, assigned_at, status, note, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (target_type, target_id, role_id, user_id,
+                 assigned_by, now, status, note, now, now)
+            )
+            return cursor.lastrowid
+
+    @staticmethod
+    def update(assignment_id: int, **kwargs) -> bool:
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            fields = []
+            values = []
+            for k, v in kwargs.items():
+                if v is not None:
+                    fields.append(f"{k}=?")
+                    values.append(v)
+            if not fields:
+                return False
+            fields.append("updated_at=?")
+            values.append(now)
+            values.append(assignment_id)
+            cursor.execute(f"UPDATE assignments SET {', '.join(fields)} WHERE id=?", values)
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def delete(assignment_id: int) -> bool:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM assignments WHERE id=?", (assignment_id,))
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def get_all(target_type: str = None, status: str = None,
+                user_id: int = None, role_id: int = None) -> List[Dict[str, Any]]:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            sql = """
+                SELECT a.*, u.real_name as assigned_to_name,
+                r.name as role_name, ab.real_name as assigned_by_name
+                FROM assignments a
+                LEFT JOIN users u ON a.user_id = u.id
+                LEFT JOIN roles r ON a.role_id = r.id
+                LEFT JOIN users ab ON a.assigned_by = ab.id
+            """
+            conditions = []
+            params = []
+            if target_type:
+                conditions.append("a.target_type=?")
+                params.append(target_type)
+            if status:
+                conditions.append("a.status=?")
+                params.append(status)
+            if user_id:
+                conditions.append("a.user_id=?")
+                params.append(user_id)
+            if role_id:
+                conditions.append("a.role_id=?")
+                params.append(role_id)
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
+            sql += " ORDER BY a.created_at DESC"
+            cursor.execute(sql, params)
             return [dict(row) for row in cursor.fetchall()]
