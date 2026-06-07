@@ -412,3 +412,122 @@ class ChartWidget(QWidget):
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3, axis="y")
         self.canvas.draw()
+
+    def plot_moisture_comparison(self, eval_data_list: List[Dict[str, Any]],
+                                  threshold: float = 20.0):
+        self.canvas.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        if not eval_data_list:
+            ax.text(0.5, 0.5, "暂无数据", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=14)
+            self.canvas.draw()
+            return
+
+        labels = []
+        before_vals = []
+        after_vals = []
+        for e in eval_data_list:
+            component_name = e.get("component_name", f"病害{e.get('defect_id', '')}")
+            if e.get("component_code"):
+                component_name = f"{e['component_code']} {component_name}"
+            labels.append(component_name[:12])
+            before_vals.append(e.get("moisture_before") or 0)
+            after_vals.append(e.get("moisture_after") or 0)
+
+        x = np.arange(len(labels))
+        width = 0.35
+
+        bars1 = ax.bar(x - width / 2, before_vals, width,
+                       label="维修前", color="#e74c3c", alpha=0.85)
+        bars2 = ax.bar(x + width / 2, after_vals, width,
+                       label="维修后", color="#27ae60", alpha=0.85)
+
+        ax.axhline(y=threshold, color="red", linestyle="--",
+                    label=f"阈值 ({threshold}%)", alpha=0.6)
+
+        for bar in bars1:
+            height = bar.get_height()
+            if height > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, height,
+                        f"{height:.1f}%", ha="center", va="bottom", fontsize=9)
+        for bar in bars2:
+            height = bar.get_height()
+            if height > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, height,
+                        f"{height:.1f}%", ha="center", va="bottom", fontsize=9)
+
+        ax.set_xlabel("构件", fontsize=11)
+        ax.set_ylabel("含水率 (%)", fontsize=11)
+        ax.set_title("维修前后含水率对比", fontsize=13, fontweight="bold")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=30, ha="right")
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3, axis="y")
+        self.canvas.draw()
+
+    def plot_defect_type_distribution(self, defect_stats: Dict[str, int]):
+        self.canvas.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        if not defect_stats:
+            ax.text(0.5, 0.5, "暂无数据", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=14)
+            self.canvas.draw()
+            return
+
+        types = list(defect_stats.keys())
+        counts = list(defect_stats.values())
+
+        colors = ["#3498db", "#e74c3c", "#f39c12", "#2ecc71",
+                  "#9b59b6", "#1abc9c", "#e67e22", "#34495e", "#95a5a6"]
+        bars = ax.bar(types, counts, color=colors[:len(types)], alpha=0.85)
+
+        for bar, val in zip(bars, counts):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                    str(val), ha="center", va="bottom", fontsize=10, fontweight="bold")
+
+        ax.set_xlabel("病害类型", fontsize=11)
+        ax.set_ylabel("数量", fontsize=11)
+        ax.set_title("病害类型分布", fontsize=13, fontweight="bold")
+        ax.set_xticklabels(types, rotation=30, ha="right")
+        ax.grid(True, alpha=0.3, axis="y")
+        self.canvas.draw()
+
+    def plot_defect_status_pie(self, status_stats: Dict[str, int]):
+        self.canvas.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        if not status_stats or sum(status_stats.values()) == 0:
+            ax.text(0.5, 0.5, "暂无数据", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=14)
+            self.canvas.draw()
+            return
+
+        status_colors = {
+            "待处置": "#e74c3c", "处置中": "#f39c12",
+            "待验收": "#3498db", "已验收": "#9b59b6",
+            "已完成": "#2ecc71", "已关闭": "#95a5a6"
+        }
+
+        labels = []
+        sizes = []
+        colors = []
+        for s, c in status_stats.items():
+            if c > 0:
+                labels.append(f"{s}({c})")
+                sizes.append(c)
+                colors.append(status_colors.get(s, "#34495e"))
+
+        explode = [0.03] * len(sizes)
+        wedges, texts, autotexts = ax.pie(
+            sizes, explode=explode, labels=labels, colors=colors,
+            autopct="%1.1f%%", startangle=90, shadow=False
+        )
+        for t in autotexts:
+            t.set_fontsize(10)
+            t.set_color("white")
+            t.set_fontweight("bold")
+
+        ax.set_title("病害状态分布", fontsize=13, fontweight="bold")
+        self.canvas.draw()

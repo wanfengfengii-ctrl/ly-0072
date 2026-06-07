@@ -16,7 +16,10 @@ import os
 from app.db.database import (
     BuildingRepository, ComponentRepository, RecordRepository,
     SettingsRepository, InspectionPlanRepository, AnomalyReviewRepository,
-    ReportArchiveRepository
+    ReportArchiveRepository, DefectRepository, WorkOrderRepository,
+    RectificationTrackingRepository, AcceptanceRecordRepository,
+    EffectivenessEvaluationRepository, DEFECT_TYPES, DEFECT_SEVERITIES,
+    DEFECT_STATUSES, WORK_ORDER_STATUSES, PRIORITIES
 )
 from app.logic.validator import (
     analyze_component_risk, calculate_statistics
@@ -27,13 +30,17 @@ from app.logic.advanced_analytics import (
     analyze_seasonal_variation, analyze_seasonal_variation_multi,
     predict_risk_trend
 )
-from app.logic.report_exporter import generate_html_report, batch_export_reports, generate_comparison_report
+from app.logic.report_exporter import (
+    generate_html_report, batch_export_reports, generate_comparison_report,
+    generate_defect_disposal_report
+)
 from app.ui.dialogs import BuildingDialog, ComponentDialog
 from app.ui.csv_import_dialog import CSVImportDialog
 from app.ui.chart_widget import ChartWidget
 from app.ui.advanced_dialogs import (
     InspectionPlanDialog, AnomalyReviewDialog, ComponentSelectionDialog,
-    BatchExportDialog
+    BatchExportDialog, DefectDialog, WorkOrderDialog, RectificationTrackDialog,
+    AcceptanceDialog, EffectivenessEvalDialog, DefectDetailDialog
 )
 
 
@@ -123,6 +130,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._create_prediction_tab(), "📈 趋势预测")
         self.tabs.addTab(self._create_inspection_tab(), "📋 巡检计划")
         self.tabs.addTab(self._create_review_tab(), "⚠ 异常复核")
+        self.tabs.addTab(self._create_defect_tab(), "🔧 病害闭环管理")
         self.tabs.addTab(self._create_archive_tab(), "📁 报告归档")
         self.tabs.addTab(self._create_settings_tab(), "⚙ 系统设置")
 
@@ -321,6 +329,11 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_row)
 
         return widget
+
+    def _bold_font(self) -> QFont:
+        f = QFont()
+        f.setBold(True)
+        return f
 
     def _create_stat_card(self, title: str, value: str, color: str) -> QFrame:
         card = QFrame()
@@ -553,6 +566,179 @@ class MainWindow(QMainWindow):
 
         return widget
 
+    def _create_defect_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        self.defect_reminder_banner = QLabel("")
+        self.defect_reminder_banner.setStyleSheet("""
+            padding: 10px; background: #f8d7da; border: 1px solid #f5c6cb;
+            border-radius: 4px; color: #721c24; font-weight: bold;
+        """)
+        self.defect_reminder_banner.hide()
+        layout.addWidget(self.defect_reminder_banner)
+
+        stat_row = QHBoxLayout()
+        self.defect_stat_total = self._create_stat_card("病害总数", "0", "#3498db")
+        self.defect_stat_pending = self._create_stat_card("待处置", "0", "#e74c3c")
+        self.defect_stat_processing = self._create_stat_card("处置中", "0", "#f39c12")
+        self.defect_stat_completed = self._create_stat_card("已完成", "0", "#27ae60")
+        stat_row.addWidget(self.defect_stat_total)
+        stat_row.addWidget(self.defect_stat_pending)
+        stat_row.addWidget(self.defect_stat_processing)
+        stat_row.addWidget(self.defect_stat_completed)
+        layout.addLayout(stat_row)
+
+        chart_splitter = QSplitter(Qt.Horizontal)
+        self.defect_status_chart = ChartWidget()
+        self.defect_type_chart = ChartWidget()
+        self.moisture_compare_chart = ChartWidget()
+        chart_splitter.addWidget(self.defect_status_chart)
+        chart_splitter.addWidget(self.defect_type_chart)
+        chart_splitter.addWidget(self.moisture_compare_chart)
+        chart_splitter.setStretchFactor(0, 1)
+        chart_splitter.setStretchFactor(1, 1)
+        chart_splitter.setStretchFactor(2, 1)
+        self.defect_chart_splitter = chart_splitter
+        layout.addWidget(chart_splitter, stretch=1)
+
+        self.defect_detail_tabs = QTabWidget()
+
+        defect_list_widget = QWidget()
+        defect_list_layout = QVBoxLayout(defect_list_widget)
+
+        defect_btn_row = QHBoxLayout()
+        self.btn_add_defect = QPushButton("➕ 登记病害")
+        self.btn_add_defect.setStyleSheet("background-color: #e74c3c; color: white; padding: 6px 16px;")
+        self.btn_add_defect.clicked.connect(self._on_add_defect)
+        defect_btn_row.addWidget(self.btn_add_defect)
+
+        self.btn_edit_defect = QPushButton("✏ 编辑")
+        self.btn_edit_defect.clicked.connect(self._on_edit_defect)
+        defect_btn_row.addWidget(self.btn_edit_defect)
+
+        self.btn_delete_defect = QPushButton("🗑 删除")
+        self.btn_delete_defect.clicked.connect(self._on_delete_defect)
+        defect_btn_row.addWidget(self.btn_delete_defect)
+
+        self.btn_view_defect_detail = QPushButton("📋 查看详情")
+        self.btn_view_defect_detail.clicked.connect(self._on_view_defect_detail)
+        defect_btn_row.addWidget(self.btn_view_defect_detail)
+
+        self.btn_create_workorder = QPushButton("🔧 创建工单")
+        self.btn_create_workorder.setStyleSheet("background-color: #f39c12; color: white; padding: 6px 16px;")
+        self.btn_create_workorder.clicked.connect(self._on_create_workorder)
+        defect_btn_row.addWidget(self.btn_create_workorder)
+
+        self.btn_export_defect_report = QPushButton("📄 导出处置报告")
+        self.btn_export_defect_report.setStyleSheet("background-color: #3498db; color: white; padding: 6px 16px;")
+        self.btn_export_defect_report.clicked.connect(self._on_export_defect_report)
+        defect_btn_row.addWidget(self.btn_export_defect_report)
+
+        defect_btn_row.addWidget(QLabel("状态筛选:"))
+        self.defect_status_filter = QComboBox()
+        self.defect_status_filter.addItem("全部", None)
+        for s in DEFECT_STATUSES:
+            self.defect_status_filter.addItem(s, s)
+        self.defect_status_filter.currentIndexChanged.connect(self._refresh_defects)
+        defect_btn_row.addWidget(self.defect_status_filter)
+
+        defect_btn_row.addWidget(QLabel("类型筛选:"))
+        self.defect_type_filter = QComboBox()
+        self.defect_type_filter.addItem("全部", None)
+        for t in DEFECT_TYPES:
+            self.defect_type_filter.addItem(t, t)
+        self.defect_type_filter.currentIndexChanged.connect(self._refresh_defects)
+        defect_btn_row.addWidget(self.defect_type_filter)
+
+        defect_btn_row.addStretch()
+        self.btn_refresh_defects = QPushButton("🔄 刷新")
+        self.btn_refresh_defects.clicked.connect(self._refresh_defects)
+        defect_btn_row.addWidget(self.btn_refresh_defects)
+
+        defect_list_layout.addLayout(defect_btn_row)
+
+        self.defect_table = QTableWidget()
+        self.defect_table.setAlternatingRowColors(True)
+        self.defect_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.defect_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.defect_table.verticalHeader().setVisible(False)
+        self.defect_table.doubleClicked.connect(self._on_view_defect_detail)
+        defect_list_layout.addWidget(self.defect_table, stretch=1)
+
+        self.defect_detail_tabs.addTab(defect_list_widget, "📋 病害登记")
+
+        wo_list_widget = QWidget()
+        wo_list_layout = QVBoxLayout(wo_list_widget)
+
+        wo_btn_row = QHBoxLayout()
+        self.btn_edit_workorder = QPushButton("✏ 编辑工单")
+        self.btn_edit_workorder.clicked.connect(self._on_edit_workorder)
+        wo_btn_row.addWidget(self.btn_edit_workorder)
+
+        self.btn_delete_workorder = QPushButton("🗑 删除工单")
+        self.btn_delete_workorder.clicked.connect(self._on_delete_workorder)
+        wo_btn_row.addWidget(self.btn_delete_workorder)
+
+        self.btn_start_workorder = QPushButton("▶ 开始处理")
+        self.btn_start_workorder.clicked.connect(lambda: self._on_change_workorder_status("处理中"))
+        wo_btn_row.addWidget(self.btn_start_workorder)
+
+        self.btn_add_tracking = QPushButton("📝 记录整改")
+        self.btn_add_tracking.setStyleSheet("background-color: #3498db; color: white; padding: 6px 16px;")
+        self.btn_add_tracking.clicked.connect(self._on_add_tracking)
+        wo_btn_row.addWidget(self.btn_add_tracking)
+
+        self.btn_to_accept = QPushButton("✅ 申请验收")
+        self.btn_to_accept.clicked.connect(lambda: self._on_change_workorder_status("待验收"))
+        wo_btn_row.addWidget(self.btn_to_accept)
+
+        self.btn_do_acceptance = QPushButton("📝 验收")
+        self.btn_do_acceptance.setStyleSheet("background-color: #27ae60; color: white; padding: 6px 16px;")
+        self.btn_do_acceptance.clicked.connect(self._on_do_acceptance)
+        wo_btn_row.addWidget(self.btn_do_acceptance)
+
+        self.btn_do_eval = QPushButton("📊 效果评估")
+        self.btn_do_eval.setStyleSheet("background-color: #9b59b6; color: white; padding: 6px 16px;")
+        self.btn_do_eval.clicked.connect(self._on_do_evaluation)
+        wo_btn_row.addWidget(self.btn_do_eval)
+
+        wo_btn_row.addWidget(QLabel("状态筛选:"))
+        self.wo_status_filter = QComboBox()
+        self.wo_status_filter.addItem("全部", None)
+        for s in WORK_ORDER_STATUSES:
+            self.wo_status_filter.addItem(s, s)
+        self.wo_status_filter.currentIndexChanged.connect(self._refresh_workorders)
+        wo_btn_row.addWidget(self.wo_status_filter)
+
+        wo_btn_row.addStretch()
+        self.btn_refresh_workorders = QPushButton("🔄 刷新")
+        self.btn_refresh_workorders.clicked.connect(self._refresh_workorders)
+        wo_btn_row.addWidget(self.btn_refresh_workorders)
+
+        wo_list_layout.addLayout(wo_btn_row)
+
+        self.workorder_table = QTableWidget()
+        self.workorder_table.setAlternatingRowColors(True)
+        self.workorder_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.workorder_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.workorder_table.verticalHeader().setVisible(False)
+        self.workorder_table.doubleClicked.connect(self._on_edit_workorder)
+        wo_list_layout.addWidget(self.workorder_table, stretch=1)
+
+        self.defect_detail_tabs.addTab(wo_list_widget, "🔧 维修工单")
+        self.defect_detail_tabs.currentChanged.connect(self._on_defect_tab_changed)
+
+        layout.addWidget(self.defect_detail_tabs, stretch=2)
+
+        return widget
+
+    def _on_defect_tab_changed(self, index: int):
+        if self.defect_detail_tabs.tabText(index).startswith("📋"):
+            self._refresh_defects()
+        elif self.defect_detail_tabs.tabText(index).startswith("🔧"):
+            self._refresh_workorders()
+
     def _create_archive_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -571,6 +757,7 @@ class MainWindow(QMainWindow):
         self.archive_type_filter.addItem("全部", None)
         self.archive_type_filter.addItem("建筑巡检报告", "建筑巡检报告")
         self.archive_type_filter.addItem("对比分析报告", "对比分析报告")
+        self.archive_type_filter.addItem("病害处置报告", "病害处置报告")
         self.archive_type_filter.currentIndexChanged.connect(self._refresh_archives)
         btn_row.addWidget(self.archive_type_filter)
 
@@ -1194,14 +1381,21 @@ class MainWindow(QMainWindow):
             self._refresh_inspection_plans()
         elif "异常复核" in tab_name:
             self._refresh_anomaly_reviews()
+        elif "病害闭环" in tab_name:
+            self._refresh_defects()
+            self._refresh_workorders()
         elif "报告归档" in tab_name:
             self._refresh_archives()
 
     def _start_reminder_timer(self):
         self._reminder_timer = QTimer(self)
-        self._reminder_timer.timeout.connect(self._check_inspection_reminders)
+        self._reminder_timer.timeout.connect(self._check_all_reminders)
         self._reminder_timer.start(60000)
-        QTimer.singleShot(1000, self._check_inspection_reminders)
+        QTimer.singleShot(1000, self._check_all_reminders)
+
+    def _check_all_reminders(self):
+        self._check_inspection_reminders()
+        self._check_defect_overdue()
 
     def _check_inspection_reminders(self):
         upcoming = InspectionPlanRepository.get_upcoming()
@@ -1858,3 +2052,385 @@ class MainWindow(QMainWindow):
                 self._refresh_dashboard()
             except Exception as e:
                 QMessageBox.critical(self, "导出失败", f"批量导出失败: {str(e)}")
+
+    def _refresh_defects(self):
+        status_filter = self.defect_status_filter.currentData()
+        type_filter = self.defect_type_filter.currentData()
+        selected = self._get_selected_building_from_tree()
+        building_id = selected["building_id"] if selected else None
+
+        defects = DefectRepository.get_all(
+            building_id=building_id, status=status_filter, defect_type=type_filter
+        )
+
+        headers = ["ID", "建筑", "构件", "病害类型", "严重程度", "状态", "发现日期", "描述"]
+        self.defect_table.setColumnCount(len(headers))
+        self.defect_table.setHorizontalHeaderLabels(headers)
+        self.defect_table.setRowCount(len(defects))
+
+        sev_colors = {
+            "轻微": QColor(39, 174, 96), "一般": QColor(243, 156, 18),
+            "严重": QColor(230, 126, 34), "危急": QColor(231, 76, 60)
+        }
+        status_colors = {
+            "待处置": QColor(231, 76, 60), "处置中": QColor(243, 156, 18),
+            "待验收": QColor(52, 152, 219), "已验收": QColor(155, 89, 182),
+            "已完成": QColor(39, 174, 96), "已关闭": QColor(149, 165, 166)
+        }
+
+        for row, d in enumerate(defects):
+            items = [
+                QTableWidgetItem(str(d["id"])),
+                QTableWidgetItem(d.get("building_name", "") or "-"),
+                QTableWidgetItem(
+                    f"{d.get('component_code', '') or ''} {d.get('component_name', '') or ''}".strip() or "-"
+                ),
+                QTableWidgetItem(d.get("defect_type", "")),
+                QTableWidgetItem(d.get("severity", "")),
+                QTableWidgetItem(d.get("status", "")),
+                QTableWidgetItem((d.get("discovery_date", "") or "")[:10]),
+                QTableWidgetItem((d.get("description", "") or "")[:60]),
+            ]
+            sev_color = sev_colors.get(d.get("severity", ""))
+            status_color = status_colors.get(d.get("status", ""))
+            if sev_color:
+                items[4].setForeground(QBrush(sev_color))
+                items[4].setFont(self._bold_font())
+            if status_color:
+                items[5].setForeground(QBrush(status_color))
+                items[5].setFont(self._bold_font())
+            for col, it in enumerate(items):
+                self.defect_table.setItem(row, col, it)
+
+        self.defect_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.defect_table.horizontalHeader().setStretchLastSection(True)
+
+        self._refresh_defect_stats()
+        self._check_defect_overdue()
+        self._refresh_defect_charts()
+
+    def _refresh_defect_stats(self):
+        selected = self._get_selected_building_from_tree()
+        building_id = selected["building_id"] if selected else None
+        stats = DefectRepository.get_statistics(building_id)
+        self.defect_stat_total.findChild(QLabel, "value").setText(str(stats.get("total", 0)))
+        self.defect_stat_pending.findChild(QLabel, "value").setText(str(stats.get("待处置", 0)))
+        self.defect_stat_processing.findChild(QLabel, "value").setText(str(stats.get("处置中", 0)))
+        self.defect_stat_completed.findChild(QLabel, "value").setText(str(stats.get("已完成", 0)))
+
+    def _check_defect_overdue(self):
+        reminders = DefectRepository.get_overdue_reminders()
+        if reminders:
+            msg = f"⚠ 有 {len(reminders)} 个维修工单已超期，请及时处理！"
+            for r in reminders[:3]:
+                msg += f"\n  • {r.get('order_no', '')} - {r.get('title', '')} (截止: {str(r.get('deadline', ''))[:10]})"
+            if len(reminders) > 3:
+                msg += f"\n  ... 还有 {len(reminders) - 3} 个超期工单"
+            self.defect_reminder_banner.setText(msg)
+            self.defect_reminder_banner.show()
+        else:
+            self.defect_reminder_banner.hide()
+
+    def _refresh_defect_charts(self):
+        selected = self._get_selected_building_from_tree()
+        building_id = selected["building_id"] if selected else None
+        stats = DefectRepository.get_statistics(building_id)
+
+        status_data = {}
+        for s in DEFECT_STATUSES:
+            if stats.get(s, 0) > 0:
+                status_data[s] = stats.get(s, 0)
+        self.defect_status_chart.plot_defect_status_pie(status_data)
+
+        type_data = stats.get("by_type", {})
+        self.defect_type_chart.plot_defect_type_distribution(type_data)
+
+        evals = EffectivenessEvaluationRepository.get_all(building_id=building_id)
+        self.moisture_compare_chart.plot_moisture_comparison(
+            evals, SettingsRepository.get_moisture_threshold()
+        )
+
+    def _refresh_workorders(self):
+        status_filter = self.wo_status_filter.currentData()
+        selected = self._get_selected_building_from_tree()
+        building_id = selected["building_id"] if selected else None
+
+        workorders = WorkOrderRepository.get_all(
+            building_id=building_id, status=status_filter
+        )
+
+        headers = ["ID", "工单编号", "标题", "病害类型", "优先级", "状态", "负责人", "派工日期", "截止日期"]
+        self.workorder_table.setColumnCount(len(headers))
+        self.workorder_table.setHorizontalHeaderLabels(headers)
+        self.workorder_table.setRowCount(len(workorders))
+
+        prio_colors = {
+            "低": QColor(149, 165, 166), "中": QColor(52, 152, 219),
+            "高": QColor(230, 126, 34), "紧急": QColor(231, 76, 60)
+        }
+        wo_status_colors = {
+            "待处理": QColor(231, 76, 60), "处理中": QColor(243, 156, 18),
+            "待验收": QColor(52, 152, 219), "已完成": QColor(39, 174, 96),
+            "已取消": QColor(149, 165, 166)
+        }
+
+        for row, w in enumerate(workorders):
+            items = [
+                QTableWidgetItem(str(w["id"])),
+                QTableWidgetItem(w.get("order_no", "")),
+                QTableWidgetItem(w.get("title", "")),
+                QTableWidgetItem(w.get("defect_type", "") or ""),
+                QTableWidgetItem(w.get("priority", "")),
+                QTableWidgetItem(w.get("status", "")),
+                QTableWidgetItem(w.get("assignee", "") or "-"),
+                QTableWidgetItem((w.get("assign_date", "") or "")[:10]),
+                QTableWidgetItem((w.get("deadline", "") or "")[:10]),
+            ]
+            p_color = prio_colors.get(w.get("priority", ""))
+            s_color = wo_status_colors.get(w.get("status", ""))
+            if p_color:
+                items[4].setForeground(QBrush(p_color))
+                items[4].setFont(self._bold_font())
+            if s_color:
+                items[5].setForeground(QBrush(s_color))
+                items[5].setFont(self._bold_font())
+            for col, it in enumerate(items):
+                self.workorder_table.setItem(row, col, it)
+
+        self.workorder_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.workorder_table.horizontalHeader().setStretchLastSection(True)
+
+    def _get_selected_defect_id(self) -> Optional[int]:
+        rows = self.defect_table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        return int(self.defect_table.item(rows[0].row(), 0).text())
+
+    def _get_selected_workorder_id(self) -> Optional[int]:
+        rows = self.workorder_table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        return int(self.workorder_table.item(rows[0].row(), 0).text())
+
+    def _on_add_defect(self):
+        dlg = DefectDialog(self)
+        if dlg.exec():
+            data = dlg.get_data()
+            try:
+                DefectRepository.create(**data)
+                QMessageBox.information(self, "成功", "病害登记成功")
+                self._refresh_defects()
+                self._refresh_dashboard()
+            except Exception as e:
+                QMessageBox.critical(self, "失败", f"登记失败: {str(e)}")
+
+    def _on_edit_defect(self):
+        did = self._get_selected_defect_id()
+        if not did:
+            QMessageBox.warning(self, "提示", "请先选择要编辑的病害")
+            return
+        defect = DefectRepository.get_by_id(did)
+        if not defect:
+            return
+        dlg = DefectDialog(self, defect=defect)
+        if dlg.exec():
+            data = dlg.get_data()
+            try:
+                DefectRepository.update(did, **data)
+                QMessageBox.information(self, "成功", "病害信息已更新")
+                self._refresh_defects()
+                self._refresh_dashboard()
+            except Exception as e:
+                QMessageBox.critical(self, "失败", f"更新失败: {str(e)}")
+
+    def _on_delete_defect(self):
+        did = self._get_selected_defect_id()
+        if not did:
+            QMessageBox.warning(self, "提示", "请先选择要删除的病害")
+            return
+        reply = QMessageBox.question(
+            self, "确认删除", "确定要删除该病害及其关联的工单、验收、评估记录吗？",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        if DefectRepository.delete(did):
+            QMessageBox.information(self, "成功", "删除成功")
+            self._refresh_defects()
+            self._refresh_workorders()
+            self._refresh_dashboard()
+        else:
+            QMessageBox.warning(self, "失败", "删除失败")
+
+    def _on_view_defect_detail(self):
+        did = self._get_selected_defect_id()
+        if not did:
+            QMessageBox.warning(self, "提示", "请先选择病害")
+            return
+        dlg = DefectDetailDialog(self, defect_id=did)
+        dlg.exec()
+
+    def _on_create_workorder(self):
+        did = self._get_selected_defect_id()
+        if not did:
+            QMessageBox.warning(self, "提示", "请先选择要创建工单的病害")
+            return
+        if DefectRepository.has_open_work_order(did):
+            QMessageBox.warning(self, "提示", "该病害已有未关闭的维修工单，请先处理现有工单")
+            return
+        dlg = WorkOrderDialog(self, defect_id=did)
+        if dlg.exec():
+            data = dlg.get_data()
+            try:
+                WorkOrderRepository.create(**data)
+                QMessageBox.information(self, "成功", "维修工单创建成功，病害状态已更新为「处置中」")
+                self._refresh_defects()
+                self._refresh_workorders()
+                self._refresh_dashboard()
+            except Exception as e:
+                QMessageBox.critical(self, "失败", f"创建失败: {str(e)}")
+
+    def _on_edit_workorder(self):
+        wid = self._get_selected_workorder_id()
+        if not wid:
+            QMessageBox.warning(self, "提示", "请先选择要编辑的工单")
+            return
+        wo = WorkOrderRepository.get_by_id(wid)
+        if not wo:
+            return
+        dlg = WorkOrderDialog(self, work_order=wo)
+        if dlg.exec():
+            data = dlg.get_data()
+            try:
+                WorkOrderRepository.update(wid, **data)
+                QMessageBox.information(self, "成功", "工单已更新")
+                self._refresh_workorders()
+                self._refresh_defects()
+            except Exception as e:
+                QMessageBox.critical(self, "失败", f"更新失败: {str(e)}")
+
+    def _on_delete_workorder(self):
+        wid = self._get_selected_workorder_id()
+        if not wid:
+            QMessageBox.warning(self, "提示", "请先选择要删除的工单")
+            return
+        reply = QMessageBox.question(self, "确认删除", "确定要删除该维修工单吗？",
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        if WorkOrderRepository.delete(wid):
+            QMessageBox.information(self, "成功", "删除成功")
+            self._refresh_workorders()
+            self._refresh_defects()
+        else:
+            QMessageBox.warning(self, "失败", "删除失败")
+
+    def _on_change_workorder_status(self, new_status: str):
+        wid = self._get_selected_workorder_id()
+        if not wid:
+            QMessageBox.warning(self, "提示", "请先选择工单")
+            return
+        try:
+            WorkOrderRepository.update_status(wid, new_status, operator="系统用户",
+                                              change_note=f"状态变更为「{new_status}」")
+            QMessageBox.information(self, "成功", f"工单状态已更新为「{new_status}」")
+            self._refresh_workorders()
+            self._refresh_defects()
+        except Exception as e:
+            QMessageBox.critical(self, "失败", f"操作失败: {str(e)}")
+
+    def _on_add_tracking(self):
+        wid = self._get_selected_workorder_id()
+        if not wid:
+            QMessageBox.warning(self, "提示", "请先选择要记录整改的工单")
+            return
+        dlg = RectificationTrackDialog(self, work_order_id=wid)
+        if dlg.exec():
+            data = dlg.get_data()
+            try:
+                RectificationTrackingRepository.create(**data)
+                QMessageBox.information(self, "成功", "整改记录已保存")
+                self._refresh_workorders()
+            except Exception as e:
+                QMessageBox.critical(self, "失败", f"保存失败: {str(e)}")
+
+    def _on_do_acceptance(self):
+        wid = self._get_selected_workorder_id()
+        if not wid:
+            QMessageBox.warning(self, "提示", "请先选择要验收的工单")
+            return
+        wo = WorkOrderRepository.get_by_id(wid)
+        if not wo:
+            return
+        if AcceptanceRecordRepository.get_by_work_order(wid):
+            reply = QMessageBox.question(
+                self, "已存在验收记录", "该工单已有验收记录，是否覆盖？",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        dlg = AcceptanceDialog(self, work_order_id=wid, defect_id=wo.get("defect_id"))
+        if dlg.exec():
+            data = dlg.get_data()
+            try:
+                AcceptanceRecordRepository.create(**data)
+                QMessageBox.information(self, "成功", "验收记录已保存，相关状态已自动更新")
+                self._refresh_workorders()
+                self._refresh_defects()
+                self._refresh_dashboard()
+            except Exception as e:
+                QMessageBox.critical(self, "失败", f"保存失败: {str(e)}")
+
+    def _on_do_evaluation(self):
+        wid = self._get_selected_workorder_id()
+        if not wid:
+            QMessageBox.warning(self, "提示", "请先选择要评估的工单")
+            return
+        wo = WorkOrderRepository.get_by_id(wid)
+        if not wo:
+            return
+        defect_id = wo.get("defect_id")
+        if EffectivenessEvaluationRepository.get_by_defect(defect_id):
+            reply = QMessageBox.question(
+                self, "已存在评估记录", "该病害已有效果评估记录，是否覆盖？",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        dlg = EffectivenessEvalDialog(self, defect_id=defect_id)
+        if dlg.exec():
+            data = dlg.get_data()
+            try:
+                EffectivenessEvaluationRepository.create(**data)
+                QMessageBox.information(self, "成功", "效果评估已保存，病害状态已更新为「已完成」")
+                self._refresh_defects()
+                self._refresh_workorders()
+                self._refresh_dashboard()
+                self._refresh_defect_charts()
+            except Exception as e:
+                QMessageBox.critical(self, "失败", f"保存失败: {str(e)}")
+
+    def _on_export_defect_report(self):
+        did = self._get_selected_defect_id()
+        if not did:
+            QMessageBox.warning(self, "提示", "请先选择要导出报告的病害")
+            return
+        try:
+            output_path = generate_defect_disposal_report(did)
+            defect = DefectRepository.get_by_id(did)
+            try:
+                ReportArchiveRepository.create(
+                    report_type="病害处置报告",
+                    file_name=os.path.basename(output_path),
+                    file_path=output_path,
+                    file_size=os.path.getsize(output_path),
+                    building_id=defect.get("building_id"),
+                    component_id=defect.get("component_id"),
+                    description=f"{defect.get('defect_type', '')} - {defect.get('severity', '')}处置报告"
+                )
+            except Exception:
+                pass
+            QMessageBox.information(self, "成功", f"报告已导出到:\n{output_path}")
+            self._refresh_archives()
+        except Exception as e:
+            QMessageBox.critical(self, "失败", f"导出失败: {str(e)}")

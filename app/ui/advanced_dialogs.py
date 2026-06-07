@@ -13,7 +13,12 @@ import os
 
 from app.db.database import (
     BuildingRepository, ComponentRepository, InspectionPlanRepository,
-    AnomalyReviewRepository, SettingsRepository, ReportArchiveRepository
+    AnomalyReviewRepository, SettingsRepository, ReportArchiveRepository,
+    DefectRepository, WorkOrderRepository, RectificationTrackingRepository,
+    AcceptanceRecordRepository, EffectivenessEvaluationRepository,
+    DefectStatusLogRepository,
+    DEFECT_TYPES, DEFECT_SEVERITIES, DEFECT_STATUSES,
+    WORK_ORDER_STATUSES, PRIORITIES, ACCEPT_RESULTS, EFFECT_LEVELS
 )
 from app.logic.advanced_analytics import get_all_components_for_comparison
 
@@ -461,3 +466,829 @@ class BatchExportDialog(QDialog):
             "output_dir": self.path_edit.text().strip(),
             "archive": self.archive_check.isChecked()
         }
+
+
+class DefectDialog(QDialog):
+    def __init__(self, parent=None, defect: Optional[Dict[str, Any]] = None,
+                 default_component_id: int = None,
+                 anomaly_review_id: int = None):
+        super().__init__(parent)
+        self.defect = defect
+        self.default_component_id = default_component_id
+        self.anomaly_review_id = anomaly_review_id
+        self.setWindowTitle("编辑病害登记" if defect else "新增病害登记")
+        self.resize(600, 650)
+        self._init_ui()
+        if defect:
+            self._load_data(defect)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        form_group = QGroupBox("病害基本信息")
+        form = QFormLayout(form_group)
+
+        self.building_combo = QComboBox()
+        self.building_combo.addItem("请选择...", None)
+        for b in BuildingRepository.get_all():
+            self.building_combo.addItem(b["name"], b["id"])
+        self.building_combo.currentIndexChanged.connect(self._on_building_changed)
+        form.addRow("所属建筑 *:", self.building_combo)
+
+        self.component_combo = QComboBox()
+        self.component_combo.addItem("请先选择建筑", None)
+        form.addRow("所属构件 *:", self.component_combo)
+
+        self.defect_type_combo = QComboBox()
+        self.defect_type_combo.addItems(DEFECT_TYPES)
+        form.addRow("病害类型 *:", self.defect_type_combo)
+
+        self.severity_combo = QComboBox()
+        self.severity_combo.addItems(DEFECT_SEVERITIES)
+        self.severity_combo.setCurrentText("一般")
+        form.addRow("严重程度 *:", self.severity_combo)
+
+        self.discovery_date = QDateEdit()
+        self.discovery_date.setCalendarPopup(True)
+        self.discovery_date.setDate(QDate.currentDate())
+        self.discovery_date.setDisplayFormat("yyyy-MM-dd")
+        form.addRow("发现日期 *:", self.discovery_date)
+
+        self.discoverer_edit = QLineEdit()
+        self.discoverer_edit.setPlaceholderText("发现人姓名")
+        form.addRow("发现人:", self.discoverer_edit)
+
+        self.location_edit = QLineEdit()
+        self.location_edit.setPlaceholderText("如：梁端东侧、柱脚北侧等")
+        form.addRow("具体位置:", self.location_edit)
+
+        self.desc_edit = QTextEdit()
+        self.desc_edit.setPlaceholderText("请详细描述病害情况...")
+        self.desc_edit.setMinimumHeight(100)
+        form.addRow("病害描述 *:", self.desc_edit)
+
+        self.remark_edit = QTextEdit()
+        self.remark_edit.setPlaceholderText("其他备注信息...")
+        self.remark_edit.setMinimumHeight(60)
+        form.addRow("备注:", self.remark_edit)
+
+        if self.default_component_id:
+            comp = ComponentRepository.get_by_id(self.default_component_id)
+            if comp:
+                for i in range(self.building_combo.count()):
+                    if self.building_combo.itemData(i) == comp["building_id"]:
+                        self.building_combo.setCurrentIndex(i)
+                        self._on_building_changed()
+                        break
+                for i in range(self.component_combo.count()):
+                    if self.component_combo.itemData(i) == self.default_component_id:
+                        self.component_combo.setCurrentIndex(i)
+                        break
+
+        layout.addWidget(form_group)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_building_changed(self):
+        building_id = self.building_combo.currentData()
+        self.component_combo.clear()
+        if building_id:
+            components = ComponentRepository.get_by_building(building_id)
+            if not components:
+                self.component_combo.addItem("该建筑下暂无构件", None)
+            for c in components:
+                self.component_combo.addItem(
+                    f"{c['code']} - {c['name']} ({c['component_type']})", c["id"]
+                )
+        else:
+            self.component_combo.addItem("请先选择建筑", None)
+
+    def _load_data(self, defect: Dict[str, Any]):
+        building_id = defect.get("building_id")
+        for i in range(self.building_combo.count()):
+            if self.building_combo.itemData(i) == building_id:
+                self.building_combo.setCurrentIndex(i)
+                self._on_building_changed()
+                break
+        component_id = defect.get("component_id")
+        for i in range(self.component_combo.count()):
+            if self.component_combo.itemData(i) == component_id:
+                self.component_combo.setCurrentIndex(i)
+                break
+        dtype = defect.get("defect_type", "")
+        idx = self.defect_type_combo.findText(dtype)
+        if idx >= 0:
+            self.defect_type_combo.setCurrentIndex(idx)
+        severity = defect.get("severity", "一般")
+        idx = self.severity_combo.findText(severity)
+        if idx >= 0:
+            self.severity_combo.setCurrentIndex(idx)
+        discovery_date = defect.get("discovery_date", "")
+        if discovery_date:
+            try:
+                dt = datetime.fromisoformat(discovery_date.split(" ")[0])
+                self.discovery_date.setDate(QDate(dt.year, dt.month, dt.day))
+            except Exception:
+                pass
+        self.discoverer_edit.setText(defect.get("discoverer", "") or "")
+        self.location_edit.setText(defect.get("location_detail", "") or "")
+        self.desc_edit.setPlainText(defect.get("description", "") or "")
+        self.remark_edit.setPlainText(defect.get("remark", "") or "")
+
+    def _on_accept(self):
+        if not self.component_combo.currentData():
+            QMessageBox.warning(self, "提示", "请选择所属构件")
+            return
+        if not self.desc_edit.toPlainText().strip():
+            QMessageBox.warning(self, "提示", "请填写病害描述")
+            return
+        self.accept()
+
+    def get_data(self) -> Dict[str, Any]:
+        return {
+            "component_id": self.component_combo.currentData(),
+            "defect_type": self.defect_type_combo.currentText(),
+            "severity": self.severity_combo.currentText(),
+            "description": self.desc_edit.toPlainText().strip(),
+            "location_detail": self.location_edit.text().strip(),
+            "discovery_date": self.discovery_date.date().toString("yyyy-MM-dd"),
+            "discoverer": self.discoverer_edit.text().strip(),
+            "remark": self.remark_edit.toPlainText().strip(),
+            "anomaly_review_id": self.anomaly_review_id
+        }
+
+
+class WorkOrderDialog(QDialog):
+    def __init__(self, parent=None, work_order: Optional[Dict[str, Any]] = None,
+                 default_defect_id: int = None):
+        super().__init__(parent)
+        self.work_order = work_order
+        self.default_defect_id = default_defect_id
+        self.setWindowTitle("编辑维修工单" if work_order else "新增维修工单")
+        self.resize(600, 700)
+        self._init_ui()
+        if work_order:
+            self._load_data(work_order)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        info_group = QGroupBox("关联病害")
+        info_form = QFormLayout(info_group)
+        self.defect_combo = QComboBox()
+        self.defect_combo.addItem("请选择病害", None)
+        defects = DefectRepository.get_all()
+        for d in defects:
+            if d["status"] in ("待处置", "处置中") and not DefectRepository.has_open_work_order(d["id"]):
+                self.defect_combo.addItem(
+                    f"[{d['id']}] {d['defect_type']} - {d['component_code']} {d['component_name']}: {d['description'][:30]}",
+                    d["id"]
+                )
+            elif self.work_order and d["id"] == self.work_order.get("defect_id"):
+                self.defect_combo.addItem(
+                    f"[{d['id']}] {d['defect_type']} - {d['component_code']} {d['component_name']}: {d['description'][:30]}",
+                    d["id"]
+                )
+        info_form.addRow("关联病害 *:", self.defect_combo)
+        if self.default_defect_id:
+            for i in range(self.defect_combo.count()):
+                if self.defect_combo.itemData(i) == self.default_defect_id:
+                    self.defect_combo.setCurrentIndex(i)
+                    break
+        layout.addWidget(info_group)
+
+        form_group = QGroupBox("工单信息")
+        form = QFormLayout(form_group)
+
+        self.title_edit = QLineEdit()
+        self.title_edit.setPlaceholderText("如：大梁腐朽加固维修")
+        form.addRow("工单标题 *:", self.title_edit)
+
+        self.status_combo = QComboBox()
+        self.status_combo.addItems(WORK_ORDER_STATUSES)
+        form.addRow("工单状态:", self.status_combo)
+
+        self.priority_combo = QComboBox()
+        self.priority_combo.addItems(PRIORITIES)
+        self.priority_combo.setCurrentText("中")
+        form.addRow("优先级 *:", self.priority_combo)
+
+        self.assignee_edit = QLineEdit()
+        self.assignee_edit.setPlaceholderText("负责维修的人员或班组")
+        form.addRow("负责人:", self.assignee_edit)
+
+        self.assign_date = QDateEdit()
+        self.assign_date.setCalendarPopup(True)
+        self.assign_date.setDate(QDate.currentDate())
+        self.assign_date.setDisplayFormat("yyyy-MM-dd")
+        form.addRow("派工日期 *:", self.assign_date)
+
+        self.deadline = QDateEdit()
+        self.deadline.setCalendarPopup(True)
+        self.deadline.setDate(QDate.currentDate().addDays(14))
+        self.deadline.setDisplayFormat("yyyy-MM-dd")
+        self.deadline.setSpecialValueText("")
+        form.addRow("截止日期:", self.deadline)
+
+        self.content_edit = QTextEdit()
+        self.content_edit.setPlaceholderText("详细描述维修内容、工艺要求、技术标准等...")
+        self.content_edit.setMinimumHeight(100)
+        form.addRow("维修内容 *:", self.content_edit)
+
+        self.materials_edit = QTextEdit()
+        self.materials_edit.setPlaceholderText("所需材料清单，如：楠木 0.5m³、环氧树脂 5kg 等...")
+        self.materials_edit.setMinimumHeight(60)
+        form.addRow("所需材料:", self.materials_edit)
+
+        self.operator_edit = QLineEdit()
+        self.operator_edit.setPlaceholderText("创建人/操作人")
+        form.addRow("操作人:", self.operator_edit)
+
+        layout.addWidget(form_group)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _load_data(self, wo: Dict[str, Any]):
+        defect_id = wo.get("defect_id")
+        for i in range(self.defect_combo.count()):
+            if self.defect_combo.itemData(i) == defect_id:
+                self.defect_combo.setCurrentIndex(i)
+                break
+        self.defect_combo.setEnabled(False)
+        self.title_edit.setText(wo.get("title", "") or "")
+        status = wo.get("status", "")
+        idx = self.status_combo.findText(status)
+        if idx >= 0:
+            self.status_combo.setCurrentIndex(idx)
+        priority = wo.get("priority", "中")
+        idx = self.priority_combo.findText(priority)
+        if idx >= 0:
+            self.priority_combo.setCurrentIndex(idx)
+        self.assignee_edit.setText(wo.get("assignee", "") or "")
+        assign_date = wo.get("assign_date", "")
+        if assign_date:
+            try:
+                dt = datetime.fromisoformat(assign_date.split(" ")[0])
+                self.assign_date.setDate(QDate(dt.year, dt.month, dt.day))
+            except Exception:
+                pass
+        deadline = wo.get("deadline", "")
+        if deadline:
+            try:
+                dt = datetime.fromisoformat(deadline.split(" ")[0])
+                self.deadline.setDate(QDate(dt.year, dt.month, dt.day))
+            except Exception:
+                pass
+        self.content_edit.setPlainText(wo.get("work_content", "") or "")
+        self.materials_edit.setPlainText(wo.get("required_materials", "") or "")
+        self.operator_edit.setText(wo.get("operator", "") or "")
+
+    def _on_accept(self):
+        if not self.defect_combo.currentData():
+            QMessageBox.warning(self, "提示", "请选择关联病害")
+            return
+        if not self.title_edit.text().strip():
+            QMessageBox.warning(self, "提示", "请填写工单标题")
+            return
+        if not self.content_edit.toPlainText().strip():
+            QMessageBox.warning(self, "提示", "请填写维修内容")
+            return
+        self.accept()
+
+    def get_data(self) -> Dict[str, Any]:
+        return {
+            "defect_id": self.defect_combo.currentData(),
+            "title": self.title_edit.text().strip(),
+            "status": self.status_combo.currentText(),
+            "priority": self.priority_combo.currentText(),
+            "assignee": self.assignee_edit.text().strip(),
+            "assign_date": self.assign_date.date().toString("yyyy-MM-dd"),
+            "deadline": self.deadline.date().toString("yyyy-MM-dd"),
+            "work_content": self.content_edit.toPlainText().strip(),
+            "required_materials": self.materials_edit.toPlainText().strip(),
+            "operator": self.operator_edit.text().strip()
+        }
+
+
+class RectificationTrackDialog(QDialog):
+    def __init__(self, parent=None, work_order_id: int = None):
+        super().__init__(parent)
+        self.work_order_id = work_order_id
+        self.setWindowTitle("整改跟踪记录")
+        self.resize(550, 500)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        if self.work_order_id:
+            wo = WorkOrderRepository.get_by_id(self.work_order_id)
+            if wo:
+                info_label = QLabel(
+                    f"工单: {wo.get('order_no', '')} - {wo.get('title', '')}"
+                )
+                info_label.setStyleSheet("font-weight: bold; padding: 8px; background: #ecf0f1; border-radius: 4px;")
+                layout.addWidget(info_label)
+
+        form = QFormLayout()
+
+        self.track_date = QDateEdit()
+        self.track_date.setCalendarPopup(True)
+        self.track_date.setDate(QDate.currentDate())
+        self.track_date.setDisplayFormat("yyyy-MM-dd")
+        form.addRow("跟踪日期 *:", self.track_date)
+
+        self.tracker_edit = QLineEdit()
+        self.tracker_edit.setPlaceholderText("跟踪人员姓名")
+        form.addRow("跟踪人:", self.tracker_edit)
+
+        self.progress_edit = QTextEdit()
+        self.progress_edit.setPlaceholderText("当前整改进展、已完成工作等...")
+        self.progress_edit.setMinimumHeight(100)
+        form.addRow("进展情况 *:", self.progress_edit)
+
+        self.problems_edit = QTextEdit()
+        self.problems_edit.setPlaceholderText("遇到的问题和困难...")
+        self.problems_edit.setMinimumHeight(60)
+        form.addRow("存在问题:", self.problems_edit)
+
+        self.next_steps_edit = QTextEdit()
+        self.next_steps_edit.setPlaceholderText("下一步工作计划...")
+        self.next_steps_edit.setMinimumHeight(60)
+        form.addRow("下一步计划:", self.next_steps_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        if not self.progress_edit.toPlainText().strip():
+            QMessageBox.warning(self, "提示", "请填写进展情况")
+            return
+        self.accept()
+
+    def get_data(self) -> Dict[str, Any]:
+        return {
+            "work_order_id": self.work_order_id,
+            "track_date": self.track_date.date().toString("yyyy-MM-dd"),
+            "tracker": self.tracker_edit.text().strip(),
+            "progress": self.progress_edit.toPlainText().strip(),
+            "problems": self.problems_edit.toPlainText().strip(),
+            "next_steps": self.next_steps_edit.toPlainText().strip()
+        }
+
+
+class AcceptanceDialog(QDialog):
+    def __init__(self, parent=None, work_order_id: int = None):
+        super().__init__(parent)
+        self.work_order_id = work_order_id
+        self.setWindowTitle("验收记录")
+        self.resize(550, 550)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        if self.work_order_id:
+            wo = WorkOrderRepository.get_by_id(self.work_order_id)
+            if wo:
+                info_label = QLabel(
+                    f"工单: {wo.get('order_no', '')} - {wo.get('title', '')}\n"
+                    f"构件: {wo.get('component_code', '')} {wo.get('component_name', '')}"
+                )
+                info_label.setStyleSheet("font-weight: bold; padding: 8px; background: #ecf0f1; border-radius: 4px;")
+                info_label.setWordWrap(True)
+                layout.addWidget(info_label)
+
+        form = QFormLayout()
+
+        self.accept_date = QDateEdit()
+        self.accept_date.setCalendarPopup(True)
+        self.accept_date.setDate(QDate.currentDate())
+        self.accept_date.setDisplayFormat("yyyy-MM-dd")
+        form.addRow("验收日期 *:", self.accept_date)
+
+        self.result_combo = QComboBox()
+        self.result_combo.addItems(ACCEPT_RESULTS)
+        form.addRow("验收结果 *:", self.result_combo)
+
+        self.person_edit = QLineEdit()
+        self.person_edit.setPlaceholderText("验收人员姓名")
+        form.addRow("验收人:", self.person_edit)
+
+        self.items_edit = QTextEdit()
+        self.items_edit.setPlaceholderText("检查项目清单及检查结果...")
+        self.items_edit.setMinimumHeight(80)
+        form.addRow("检查项目:", self.items_edit)
+
+        self.note_edit = QTextEdit()
+        self.note_edit.setPlaceholderText("验收意见、说明等...")
+        self.note_edit.setMinimumHeight(80)
+        form.addRow("验收备注:", self.note_edit)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        if not self.person_edit.text().strip():
+            QMessageBox.warning(self, "提示", "请填写验收人")
+            return
+        self.accept()
+
+    def get_data(self) -> Dict[str, Any]:
+        return {
+            "work_order_id": self.work_order_id,
+            "accept_date": self.accept_date.date().toString("yyyy-MM-dd"),
+            "accept_result": self.result_combo.currentText(),
+            "accept_person": self.person_edit.text().strip(),
+            "inspection_items": self.items_edit.toPlainText().strip(),
+            "accept_note": self.note_edit.toPlainText().strip()
+        }
+
+
+class EffectivenessEvalDialog(QDialog):
+    def __init__(self, parent=None, defect_id: int = None):
+        super().__init__(parent)
+        self.defect_id = defect_id
+        self.setWindowTitle("效果评估")
+        self.resize(600, 650)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        if self.defect_id:
+            defect = DefectRepository.get_by_id(self.defect_id)
+            if defect:
+                info_label = QLabel(
+                    f"病害: [{defect.get('id', '')}] {defect.get('defect_type', '')} - "
+                    f"{defect.get('component_code', '')} {defect.get('component_name', '')}\n"
+                    f"描述: {defect.get('description', '')[:60]}"
+                )
+                info_label.setStyleSheet("font-weight: bold; padding: 8px; background: #ecf0f1; border-radius: 4px;")
+                info_label.setWordWrap(True)
+                layout.addWidget(info_label)
+
+        form_group = QGroupBox("评估信息")
+        form = QFormLayout(form_group)
+
+        self.eval_date = QDateEdit()
+        self.eval_date.setCalendarPopup(True)
+        self.eval_date.setDate(QDate.currentDate())
+        self.eval_date.setDisplayFormat("yyyy-MM-dd")
+        form.addRow("评估日期 *:", self.eval_date)
+
+        self.effect_combo = QComboBox()
+        self.effect_combo.addItems(EFFECT_LEVELS)
+        self.effect_combo.setCurrentText("良好")
+        form.addRow("总体效果 *:", self.effect_combo)
+
+        self.evaluator_edit = QLineEdit()
+        self.evaluator_edit.setPlaceholderText("评估人员姓名")
+        form.addRow("评估人:", self.evaluator_edit)
+
+        layout.addWidget(form_group)
+
+        moisture_group = QGroupBox("含水率对比（维修前后）")
+        moisture_form = QFormLayout(moisture_group)
+
+        self.moisture_before = QDoubleSpinBox()
+        self.moisture_before.setRange(0, 100)
+        self.moisture_before.setDecimals(1)
+        self.moisture_before.setSingleStep(0.5)
+        self.moisture_before.setSuffix(" %")
+        self.moisture_before.setSpecialValueText("未填写")
+        moisture_form.addRow("维修前含水率:", self.moisture_before)
+
+        self.moisture_after = QDoubleSpinBox()
+        self.moisture_after.setRange(0, 100)
+        self.moisture_after.setDecimals(1)
+        self.moisture_after.setSingleStep(0.5)
+        self.moisture_after.setSuffix(" %")
+        self.moisture_after.setSpecialValueText("未填写")
+        moisture_form.addRow("维修后含水率:", self.moisture_after)
+
+        layout.addWidget(moisture_group)
+
+        risk_group = QGroupBox("风险等级对比")
+        risk_form = QFormLayout(risk_group)
+
+        self.risk_before_combo = QComboBox()
+        self.risk_before_combo.addItems(["", "高风险", "中风险", "正常"])
+        risk_form.addRow("维修前风险:", self.risk_before_combo)
+
+        self.risk_after_combo = QComboBox()
+        self.risk_after_combo.addItems(["", "高风险", "中风险", "正常"])
+        risk_form.addRow("维修后风险:", self.risk_after_combo)
+
+        layout.addWidget(risk_group)
+
+        quality_group = QGroupBox("质量评价")
+        quality_form = QFormLayout(quality_group)
+
+        self.durability_combo = QComboBox()
+        self.durability_combo.addItems([""] + EFFECT_LEVELS)
+        quality_form.addRow("耐久性:", self.durability_combo)
+
+        self.aesthetic_combo = QComboBox()
+        self.aesthetic_combo.addItems([""] + EFFECT_LEVELS)
+        quality_form.addRow("美观度:", self.aesthetic_combo)
+
+        self.note_edit = QTextEdit()
+        self.note_edit.setPlaceholderText("综合评价说明、建议后续跟踪措施等...")
+        self.note_edit.setMinimumHeight(80)
+        quality_form.addRow("评估备注:", self.note_edit)
+
+        layout.addWidget(quality_group)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self):
+        if not self.evaluator_edit.text().strip():
+            QMessageBox.warning(self, "提示", "请填写评估人")
+            return
+        self.accept()
+
+    def get_data(self) -> Dict[str, Any]:
+        moisture_before = self.moisture_before.value()
+        moisture_after = self.moisture_after.value()
+        return {
+            "defect_id": self.defect_id,
+            "eval_date": self.eval_date.date().toString("yyyy-MM-dd"),
+            "overall_effect": self.effect_combo.currentText(),
+            "evaluator": self.evaluator_edit.text().strip(),
+            "moisture_before": moisture_before if moisture_before > 0 else None,
+            "moisture_after": moisture_after if moisture_after > 0 else None,
+            "risk_level_before": self.risk_before_combo.currentText() or None,
+            "risk_level_after": self.risk_after_combo.currentText() or None,
+            "durability": self.durability_combo.currentText() or None,
+            "aesthetic": self.aesthetic_combo.currentText() or None,
+            "eval_note": self.note_edit.toPlainText().strip()
+        }
+
+
+class DefectDetailDialog(QDialog):
+    def __init__(self, parent=None, defect_id: int = None):
+        super().__init__(parent)
+        self.defect_id = defect_id
+        self.setWindowTitle("病害详情 - 闭环管理全流程")
+        self.resize(800, 700)
+        self._init_ui()
+        self._load_data()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+
+        self.detail_tabs = QTabWidget()
+
+        self.info_tab = QWidget()
+        self._init_info_tab()
+        self.detail_tabs.addTab(self.info_tab, "📋 基本信息")
+
+        self.work_order_tab = QWidget()
+        self._init_work_order_tab()
+        self.detail_tabs.addTab(self.work_order_tab, "🔧 维修工单")
+
+        self.tracking_tab = QWidget()
+        self._init_tracking_tab()
+        self.detail_tabs.addTab(self.tracking_tab, "📝 整改跟踪")
+
+        self.acceptance_tab = QWidget()
+        self._init_acceptance_tab()
+        self.detail_tabs.addTab(self.acceptance_tab, "✅ 验收记录")
+
+        self.eval_tab = QWidget()
+        self._init_eval_tab()
+        self.detail_tabs.addTab(self.eval_tab, "📊 效果评估")
+
+        self.log_tab = QWidget()
+        self._init_log_tab()
+        self.detail_tabs.addTab(self.log_tab, "📜 状态流转日志")
+
+        layout.addWidget(self.detail_tabs)
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+    def _init_info_tab(self):
+        layout = QVBoxLayout(self.info_tab)
+        self.info_text = QTextEdit()
+        self.info_text.setReadOnly(True)
+        layout.addWidget(self.info_text)
+
+    def _init_work_order_tab(self):
+        layout = QVBoxLayout(self.work_order_tab)
+        self.wo_text = QTextEdit()
+        self.wo_text.setReadOnly(True)
+        layout.addWidget(self.wo_text)
+
+    def _init_tracking_tab(self):
+        layout = QVBoxLayout(self.work_order_tab)
+        layout = QVBoxLayout(self.tracking_tab)
+        self.tracking_table = QTableWidget()
+        self.tracking_table.setAlternatingRowColors(True)
+        self.tracking_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tracking_table.verticalHeader().setVisible(False)
+        self.tracking_table.setColumnCount(5)
+        self.tracking_table.setHorizontalHeaderLabels(
+            ["跟踪日期", "跟踪人", "进展", "存在问题", "下一步计划"]
+        )
+        self.tracking_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.tracking_table)
+
+    def _init_acceptance_tab(self):
+        layout = QVBoxLayout(self.acceptance_tab)
+        self.accept_text = QTextEdit()
+        self.accept_text.setReadOnly(True)
+        layout.addWidget(self.accept_text)
+
+    def _init_eval_tab(self):
+        layout = QVBoxLayout(self.eval_tab)
+        self.eval_text = QTextEdit()
+        self.eval_text.setReadOnly(True)
+        layout.addWidget(self.eval_text)
+
+    def _init_log_tab(self):
+        layout = QVBoxLayout(self.log_tab)
+        self.log_table = QTableWidget()
+        self.log_table.setAlternatingRowColors(True)
+        self.log_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.log_table.verticalHeader().setVisible(False)
+        self.log_table.setColumnCount(5)
+        self.log_table.setHorizontalHeaderLabels(
+            ["时间", "原状态", "新状态", "操作人", "变更说明"]
+        )
+        self.log_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.log_table)
+
+    def _load_data(self):
+        if not self.defect_id:
+            return
+        defect = DefectRepository.get_by_id(self.defect_id)
+        if not defect:
+            return
+
+        sev_colors = {"轻微": "#27ae60", "一般": "#f39c12", "严重": "#e67e22", "危急": "#e74c3c"}
+        sev_color = sev_colors.get(defect.get("severity", "一般"), "#333")
+
+        info_html = f"""
+        <h3 style="color: #2c3e50;">病害基本信息</h3>
+        <table style="width:100%; border-collapse: collapse;">
+            <tr><td style="padding:8px; background:#f8f9fa; width:120px;"><b>病害ID</b></td>
+                <td style="padding:8px;">{defect.get('id', '')}</td></tr>
+            <tr><td style="padding:8px; background:#f8f9fa;"><b>病害类型</b></td>
+                <td style="padding:8px;">{defect.get('defect_type', '')}</td></tr>
+            <tr><td style="padding:8px; background:#f8f9fa;"><b>严重程度</b></td>
+                <td style="padding:8px; color:{sev_color}; font-weight:bold;">{defect.get('severity', '')}</td></tr>
+            <tr><td style="padding:8px; background:#f8f9fa;"><b>当前状态</b></td>
+                <td style="padding:8px; font-weight:bold;">{defect.get('status', '')}</td></tr>
+            <tr><td style="padding:8px; background:#f8f9fa;"><b>所属建筑</b></td>
+                <td style="padding:8px;">{defect.get('building_name', '')}</td></tr>
+            <tr><td style="padding:8px; background:#f8f9fa;"><b>所属构件</b></td>
+                <td style="padding:8px;">{defect.get('component_code', '')} - {defect.get('component_name', '')} ({defect.get('component_type', '')})</td></tr>
+            <tr><td style="padding:8px; background:#f8f9fa;"><b>发现日期</b></td>
+                <td style="padding:8px;">{defect.get('discovery_date', '')}</td></tr>
+            <tr><td style="padding:8px; background:#f8f9fa;"><b>发现人</b></td>
+                <td style="padding:8px;">{defect.get('discoverer', '') or '-'}</td></tr>
+            <tr><td style="padding:8px; background:#f8f9fa;"><b>具体位置</b></td>
+                <td style="padding:8px;">{defect.get('location_detail', '') or '-'}</td></tr>
+            <tr><td style="padding:8px; background:#f8f9fa;"><b>病害描述</b></td>
+                <td style="padding:8px;">{defect.get('description', '')}</td></tr>
+            <tr><td style="padding:8px; background:#f8f9fa;"><b>备注</b></td>
+                <td style="padding:8px;">{defect.get('remark', '') or '-'}</td></tr>
+            <tr><td style="padding:8px; background:#f8f9fa;"><b>创建时间</b></td>
+                <td style="padding:8px;">{defect.get('created_at', '')[:19]}</td></tr>
+        </table>
+        """
+        self.info_text.setHtml(info_html)
+
+        work_orders = WorkOrderRepository.get_all(defect_id=self.defect_id)
+        if work_orders:
+            wo = work_orders[0]
+            wo_html = f"""
+            <h3 style="color: #2c3e50;">维修工单信息</h3>
+            <table style="width:100%; border-collapse: collapse;">
+                <tr><td style="padding:8px; background:#f8f9fa; width:120px;"><b>工单编号</b></td>
+                    <td style="padding:8px;">{wo.get('order_no', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>工单标题</b></td>
+                    <td style="padding:8px;">{wo.get('title', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>工单状态</b></td>
+                    <td style="padding:8px; font-weight:bold;">{wo.get('status', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>优先级</b></td>
+                    <td style="padding:8px;">{wo.get('priority', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>负责人</b></td>
+                    <td style="padding:8px;">{wo.get('assignee', '') or '-'}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>派工日期</b></td>
+                    <td style="padding:8px;">{wo.get('assign_date', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>截止日期</b></td>
+                    <td style="padding:8px;">{wo.get('deadline', '') or '-'}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>维修内容</b></td>
+                    <td style="padding:8px;">{wo.get('work_content', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>所需材料</b></td>
+                    <td style="padding:8px;">{wo.get('required_materials', '') or '-'}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>完成时间</b></td>
+                    <td style="padding:8px;">{wo.get('completed_at', '')[:19] if wo.get('completed_at') else '-'}</td></tr>
+            </table>
+            """
+            self.wo_text.setHtml(wo_html)
+
+            tracks = RectificationTrackingRepository.get_by_work_order(wo["id"])
+            self.tracking_table.setRowCount(len(tracks))
+            for row, t in enumerate(tracks):
+                self.tracking_table.setItem(row, 0, QTableWidgetItem(t.get("track_date", "")[:10]))
+                self.tracking_table.setItem(row, 1, QTableWidgetItem(t.get("tracker", "") or "-"))
+                self.tracking_table.setItem(row, 2, QTableWidgetItem(t.get("progress", "") or ""))
+                self.tracking_table.setItem(row, 3, QTableWidgetItem(t.get("problems", "") or "-"))
+                self.tracking_table.setItem(row, 4, QTableWidgetItem(t.get("next_steps", "") or "-"))
+        else:
+            self.wo_text.setHtml("<p style='color:#888; text-align:center; padding:40px;'>暂无关联维修工单</p>")
+
+        accept = AcceptanceRecordRepository.get_by_defect(self.defect_id)
+        if accept:
+            accept_html = f"""
+            <h3 style="color: #2c3e50;">验收记录</h3>
+            <table style="width:100%; border-collapse: collapse;">
+                <tr><td style="padding:8px; background:#f8f9fa; width:120px;"><b>工单编号</b></td>
+                    <td style="padding:8px;">{accept.get('order_no', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>验收日期</b></td>
+                    <td style="padding:8px;">{accept.get('accept_date', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>验收结果</b></td>
+                    <td style="padding:8px; font-weight:bold; color:{'#27ae60' if accept.get('accept_result') in ('合格', '基本合格') else '#e74c3c'};">
+                        {accept.get('accept_result', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>验收人</b></td>
+                    <td style="padding:8px;">{accept.get('accept_person', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>检查项目</b></td>
+                    <td style="padding:8px;">{accept.get('inspection_items', '') or '-'}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>验收备注</b></td>
+                    <td style="padding:8px;">{accept.get('accept_note', '') or '-'}</td></tr>
+            </table>
+            """
+            self.accept_text.setHtml(accept_html)
+        else:
+            self.accept_text.setHtml("<p style='color:#888; text-align:center; padding:40px;'>暂无验收记录</p>")
+
+        eval_data = EffectivenessEvaluationRepository.get_by_defect(self.defect_id)
+        if eval_data:
+            imp_color = "#27ae60" if (eval_data.get("moisture_improvement") or 0) > 0 else "#e74c3c"
+            eval_html = f"""
+            <h3 style="color: #2c3e50;">效果评估</h3>
+            <table style="width:100%; border-collapse: collapse;">
+                <tr><td style="padding:8px; background:#f8f9fa; width:140px;"><b>评估日期</b></td>
+                    <td style="padding:8px;">{eval_data.get('eval_date', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>总体效果</b></td>
+                    <td style="padding:8px; font-weight:bold;">{eval_data.get('overall_effect', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>评估人</b></td>
+                    <td style="padding:8px;">{eval_data.get('evaluator', '')}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>维修前含水率</b></td>
+                    <td style="padding:8px;">{eval_data.get('moisture_before', '') or '-'} %</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>维修后含水率</b></td>
+                    <td style="padding:8px;">{eval_data.get('moisture_after', '') or '-'} %</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>含水率改善率</b></td>
+                    <td style="padding:8px; color:{imp_color}; font-weight:bold;">
+                        {eval_data.get('moisture_improvement', '') or '-'} %</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>维修前风险</b></td>
+                    <td style="padding:8px;">{eval_data.get('risk_level_before', '') or '-'}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>维修后风险</b></td>
+                    <td style="padding:8px;">{eval_data.get('risk_level_after', '') or '-'}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>耐久性</b></td>
+                    <td style="padding:8px;">{eval_data.get('durability', '') or '-'}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>美观度</b></td>
+                    <td style="padding:8px;">{eval_data.get('aesthetic', '') or '-'}</td></tr>
+                <tr><td style="padding:8px; background:#f8f9fa;"><b>评估备注</b></td>
+                    <td style="padding:8px;">{eval_data.get('eval_note', '') or '-'}</td></tr>
+            </table>
+            """
+            self.eval_text.setHtml(eval_html)
+        else:
+            self.eval_text.setHtml("<p style='color:#888; text-align:center; padding:40px;'>暂无效果评估记录</p>")
+
+        logs = DefectStatusLogRepository.get_by_defect(self.defect_id)
+        self.log_table.setRowCount(len(logs))
+        for row, log in enumerate(logs):
+            self.log_table.setItem(row, 0, QTableWidgetItem(log.get("created_at", "")[:19]))
+            self.log_table.setItem(row, 1, QTableWidgetItem(log.get("from_status", "") or "-"))
+            to_item = QTableWidgetItem(log.get("to_status", ""))
+            to_item.setFont(QFont("", 10, QFont.Bold))
+            self.log_table.setItem(row, 2, to_item)
+            self.log_table.setItem(row, 3, QTableWidgetItem(log.get("operator", "") or "-"))
+            self.log_table.setItem(row, 4, QTableWidgetItem(log.get("change_note", "") or "-"))

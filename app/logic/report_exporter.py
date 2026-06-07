@@ -3,7 +3,9 @@ from datetime import datetime
 from typing import Dict, Any, List, Tuple
 from app.db.database import (
     BuildingRepository, ComponentRepository, RecordRepository, SettingsRepository,
-    ReportArchiveRepository
+    ReportArchiveRepository, DefectRepository, WorkOrderRepository,
+    RectificationTrackingRepository, AcceptanceRecordRepository,
+    EffectivenessEvaluationRepository, DefectStatusLogRepository
 )
 from app.logic.validator import analyze_component_risk, calculate_statistics
 
@@ -386,6 +388,223 @@ def generate_comparison_report(component_ids: List[int], output_path: str = None
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
+
+    return output_path
+
+
+def generate_defect_disposal_report(defect_id: int, output_path: str = None) -> str:
+    now = datetime.now()
+    if output_path is None:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        output_path = os.path.join(
+            base_dir,
+            f"病害处置报告_{defect_id}_{now.strftime('%Y%m%d_%H%M%S')}.html"
+        )
+
+    defect = DefectRepository.get_by_id(defect_id)
+    if not defect:
+        raise ValueError(f"找不到ID为 {defect_id} 的病害记录")
+
+    work_orders = WorkOrderRepository.get_all(defect_id=defect_id)
+    work_order = work_orders[0] if work_orders else None
+    wo_id = work_order["id"] if work_order else None
+
+    tracks = RectificationTrackingRepository.get_by_work_order(wo_id) if wo_id else []
+    accept = AcceptanceRecordRepository.get_by_defect(defect_id)
+    eval_data = EffectivenessEvaluationRepository.get_by_defect(defect_id)
+    logs = DefectStatusLogRepository.get_by_defect(defect_id)
+
+    sev_colors = {"轻微": "#27ae60", "一般": "#f39c12", "严重": "#e67e22", "危急": "#e74c3c"}
+    sev_color = sev_colors.get(defect.get("severity", "一般"), "#333")
+    status_colors = {
+        "待处置": "#e74c3c", "处置中": "#f39c12",
+        "待验收": "#3498db", "已验收": "#9b59b6",
+        "已完成": "#27ae60", "已关闭": "#95a5a6"
+    }
+    status_color = status_colors.get(defect.get("status", ""), "#333")
+
+    html_parts = []
+    html_parts.append(f"""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+    body {{ font-family: "Microsoft YaHei", sans-serif; margin: 40px; color: #333; }}
+    h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }}
+    h2 {{ color: #2980b9; margin-top: 30px; }}
+    h3 {{ color: #34495e; }}
+    table {{ border-collapse: collapse; width: 100%; margin: 15px 0; }}
+    th {{ background: #3498db; color: white; padding: 10px; text-align: left; border: 1px solid #2980b9; }}
+    td {{ padding: 8px 10px; border: 1px solid #ddd; }}
+    tr:nth-child(even) {{ background: #f8f9fa; }}
+    .summary-box {{ background: #ecf0f1; padding: 20px; border-radius: 8px; margin: 20px 0; }}
+    .footer {{ margin-top: 50px; color: #95a5a6; font-size: 12px; text-align: center; }}
+    .tag {{ display: inline-block; padding: 4px 12px; border-radius: 4px;
+            color: white; font-weight: bold; font-size: 14px; }}
+</style>
+</head>
+<body>
+    <h1>古建筑木构件病害处置报告</h1>
+    <div class="summary-box">
+        <p><strong>报告编号:</strong> DR-{defect['id']}-{now.strftime('%Y%m%d')}</p>
+        <p><strong>生成时间:</strong> {now.strftime('%Y-%m-%d %H:%M:%S')}</p>
+    </div>
+""")
+
+    html_parts.append(f"""
+    <h2>一、病害基本信息</h2>
+    <table>
+        <tr><th style="width:150px;">病害ID</th><td>{defect.get('id', '')}</td></tr>
+        <tr><th>病害类型</th><td>{defect.get('defect_type', '')}</td></tr>
+        <tr><th>严重程度</th>
+            <td><span class="tag" style="background:{sev_color};">{defect.get('severity', '')}</span></td></tr>
+        <tr><th>当前状态</th>
+            <td><span class="tag" style="background:{status_color};">{defect.get('status', '')}</span></td></tr>
+        <tr><th>所属建筑</th><td>{defect.get('building_name', '')}</td></tr>
+        <tr><th>所属构件</th>
+            <td>{defect.get('component_code', '')} - {defect.get('component_name', '')}
+                ({defect.get('component_type', '')})</td></tr>
+        <tr><th>发现日期</th><td>{defect.get('discovery_date', '')}</td></tr>
+        <tr><th>发现人</th><td>{defect.get('discoverer', '') or '-'}</td></tr>
+        <tr><th>具体位置</th><td>{defect.get('location_detail', '') or '-'}</td></tr>
+        <tr><th>病害描述</th><td>{defect.get('description', '')}</td></tr>
+        <tr><th>备注</th><td>{defect.get('remark', '') or '-'}</td></tr>
+    </table>
+""")
+
+    if work_order:
+        priority_colors = {"低": "#95a5a6", "中": "#3498db", "高": "#e67e22", "紧急": "#e74c3c"}
+        p_color = priority_colors.get(work_order.get("priority", "中"), "#333")
+        wo_status_color = status_colors.get(work_order.get("status", ""), "#333")
+        html_parts.append(f"""
+    <h2>二、维修工单信息</h2>
+    <table>
+        <tr><th style="width:150px;">工单编号</th><td><strong>{work_order.get('order_no', '')}</strong></td></tr>
+        <tr><th>工单标题</th><td>{work_order.get('title', '')}</td></tr>
+        <tr><th>工单状态</th>
+            <td><span class="tag" style="background:{wo_status_color};">{work_order.get('status', '')}</span></td></tr>
+        <tr><th>优先级</th>
+            <td><span class="tag" style="background:{p_color};">{work_order.get('priority', '')}</span></td></tr>
+        <tr><th>负责人</th><td>{work_order.get('assignee', '') or '-'}</td></tr>
+        <tr><th>派工日期</th><td>{work_order.get('assign_date', '')}</td></tr>
+        <tr><th>截止日期</th><td>{work_order.get('deadline', '') or '-'}</td></tr>
+        <tr><th>完成时间</th>
+            <td>{work_order.get('completed_at', '')[:19] if work_order.get('completed_at') else '-'}</td></tr>
+        <tr><th>维修内容</th><td style="white-space:pre-wrap;">{work_order.get('work_content', '')}</td></tr>
+        <tr><th>所需材料</th>
+            <td style="white-space:pre-wrap;">{work_order.get('required_materials', '') or '-'}</td></tr>
+    </table>
+""")
+    else:
+        html_parts.append("""
+    <h2>二、维修工单信息</h2>
+    <p style="color:#888; padding:20px; text-align:center;">暂无关联维修工单</p>
+""")
+
+    if tracks:
+        html_parts.append("""
+    <h2>三、整改跟踪记录</h2>
+    <table>
+        <tr><th>跟踪日期</th><th>跟踪人</th><th>进展情况</th><th>存在问题</th><th>下一步计划</th></tr>
+""")
+        for t in tracks:
+            html_parts.append(f"""
+        <tr>
+            <td>{t.get('track_date', '')[:10]}</td>
+            <td>{t.get('tracker', '') or '-'}</td>
+            <td style="white-space:pre-wrap;">{t.get('progress', '')}</td>
+            <td style="white-space:pre-wrap;">{t.get('problems', '') or '-'}</td>
+            <td style="white-space:pre-wrap;">{t.get('next_steps', '') or '-'}</td>
+        </tr>
+""")
+        html_parts.append("    </table>")
+    else:
+        html_parts.append("""
+    <h2>三、整改跟踪记录</h2>
+    <p style="color:#888; padding:20px; text-align:center;">暂无整改跟踪记录</p>
+""")
+
+    if accept:
+        result_color = "#27ae60" if accept.get("accept_result") in ("合格", "基本合格") else "#e74c3c"
+        html_parts.append(f"""
+    <h2>四、验收记录</h2>
+    <table>
+        <tr><th style="width:150px;">验收日期</th><td>{accept.get('accept_date', '')}</td></tr>
+        <tr><th>验收结果</th>
+            <td><span class="tag" style="background:{result_color};">{accept.get('accept_result', '')}</span></td></tr>
+        <tr><th>验收人</th><td>{accept.get('accept_person', '')}</td></tr>
+        <tr><th>检查项目</th>
+            <td style="white-space:pre-wrap;">{accept.get('inspection_items', '') or '-'}</td></tr>
+        <tr><th>验收备注</th>
+            <td style="white-space:pre-wrap;">{accept.get('accept_note', '') or '-'}</td></tr>
+    </table>
+""")
+    else:
+        html_parts.append("""
+    <h2>四、验收记录</h2>
+    <p style="color:#888; padding:20px; text-align:center;">暂无验收记录</p>
+""")
+
+    if eval_data:
+        imp_color = "#27ae60" if (eval_data.get("moisture_improvement") or 0) > 0 else "#e74c3c"
+        effect_colors = {"优秀": "#27ae60", "良好": "#2ecc71", "一般": "#f39c12", "较差": "#e74c3c"}
+        e_color = effect_colors.get(eval_data.get("overall_effect", ""), "#333")
+        html_parts.append(f"""
+    <h2>五、效果评估</h2>
+    <table>
+        <tr><th style="width:150px;">评估日期</th><td>{eval_data.get('eval_date', '')}</td></tr>
+        <tr><th>总体效果</th>
+            <td><span class="tag" style="background:{e_color};">{eval_data.get('overall_effect', '')}</span></td></tr>
+        <tr><th>评估人</th><td>{eval_data.get('evaluator', '')}</td></tr>
+        <tr><th>维修前含水率</th><td>{eval_data.get('moisture_before', '') or '-'} %</td></tr>
+        <tr><th>维修后含水率</th><td>{eval_data.get('moisture_after', '') or '-'} %</td></tr>
+        <tr><th>含水率改善率</th>
+            <td style="color:{imp_color}; font-weight:bold;">
+                {eval_data.get('moisture_improvement', '') or '-'} %</td></tr>
+        <tr><th>维修前风险等级</th><td>{eval_data.get('risk_level_before', '') or '-'}</td></tr>
+        <tr><th>维修后风险等级</th><td>{eval_data.get('risk_level_after', '') or '-'}</td></tr>
+        <tr><th>耐久性评价</th><td>{eval_data.get('durability', '') or '-'}</td></tr>
+        <tr><th>美观度评价</th><td>{eval_data.get('aesthetic', '') or '-'}</td></tr>
+        <tr><th>评估备注</th>
+            <td style="white-space:pre-wrap;">{eval_data.get('eval_note', '') or '-'}</td></tr>
+    </table>
+""")
+    else:
+        html_parts.append("""
+    <h2>五、效果评估</h2>
+    <p style="color:#888; padding:20px; text-align:center;">暂无效果评估记录</p>
+""")
+
+    if logs:
+        html_parts.append("""
+    <h2>六、状态流转日志</h2>
+    <table>
+        <tr><th>时间</th><th>原状态</th><th>新状态</th><th>操作人</th><th>变更说明</th></tr>
+""")
+        for log in logs:
+            html_parts.append(f"""
+        <tr>
+            <td>{log.get('created_at', '')[:19]}</td>
+            <td>{log.get('from_status', '') or '-'}</td>
+            <td><strong>{log.get('to_status', '')}</strong></td>
+            <td>{log.get('operator', '') or '-'}</td>
+            <td>{log.get('change_note', '') or '-'}</td>
+        </tr>
+""")
+        html_parts.append("    </table>")
+
+    html_parts.append(f"""
+    <div class="footer">
+        报告由「古建筑木构件含水率智能预警与多维分析系统」自动生成
+        <br>生成时间: {now.strftime('%Y-%m-%d %H:%M:%S')}
+    </div>
+</body>
+</html>
+""")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("".join(html_parts))
 
     return output_path
 
