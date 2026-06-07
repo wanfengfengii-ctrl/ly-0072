@@ -1,8 +1,9 @@
 import os
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from app.db.database import (
-    BuildingRepository, ComponentRepository, RecordRepository, SettingsRepository
+    BuildingRepository, ComponentRepository, RecordRepository, SettingsRepository,
+    ReportArchiveRepository
 )
 from app.logic.validator import analyze_component_risk, calculate_statistics
 
@@ -194,3 +195,188 @@ def generate_html_report(building_id: int = None, component_id: int = None,
         f.write("".join(html_parts))
 
     return output_path
+
+
+def batch_export_reports(output_dir: str, building_id: int = None,
+                         archive: bool = True) -> List[Dict[str, Any]]:
+    results = []
+    now = datetime.now()
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+
+    if building_id:
+        buildings = [BuildingRepository.get_by_id(building_id)]
+        buildings = [b for b in buildings if b]
+    else:
+        buildings = BuildingRepository.get_all()
+
+    for building in buildings:
+        b_name = "".join(c for c in building["name"] if c.isalnum() or c in (" ", "_", "-")).strip()
+        b_name = b_name.replace(" ", "_") or f"building_{building['id']}"
+        file_name = f"巡检报告_{b_name}_{timestamp}.html"
+        file_path = os.path.join(output_dir, file_name)
+
+        try:
+            generate_html_report(building_id=building["id"], output_path=file_path)
+            file_size = os.path.getsize(file_path)
+
+            archive_id = None
+            if archive:
+                archive_id = ReportArchiveRepository.create(
+                    report_type="建筑巡检报告",
+                    building_id=building["id"],
+                    file_name=file_name,
+                    file_path=file_path,
+                    file_size=file_size,
+                    generated_by="系统批量导出",
+                    description=f"{building['name']} - 批量导出巡检报告"
+                )
+
+            results.append({
+                "success": True,
+                "building_id": building["id"],
+                "building_name": building["name"],
+                "file_name": file_name,
+                "file_path": file_path,
+                "file_size": file_size,
+                "archive_id": archive_id
+            })
+        except Exception as e:
+            results.append({
+                "success": False,
+                "building_id": building["id"],
+                "building_name": building["name"],
+                "error": str(e)
+            })
+
+    return results
+
+
+def generate_comparison_report(component_ids: List[int], output_path: str = None,
+                                group_by: str = "type") -> str:
+    from app.logic.advanced_analytics import compare_components
+    from datetime import datetime
+
+    threshold = SettingsRepository.get_moisture_threshold()
+    comparison = compare_components(component_ids, group_by)
+
+    if output_path is None:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        output_path = os.path.join(base_dir, "对比分析报告_{}.html".format(datetime.now().strftime('%Y%m%d_%H%M%S')))
+
+    group_by_map = {"type": "按构件类型", "building": "按建筑", "position": "按位置"}
+    group_by_label = group_by_map.get(group_by, "自定义")
+    gen_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    comp_count = len(component_ids)
+    overall_stats = comparison['overall_stats']
+
+    html = """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+    body { font-family: "Microsoft YaHei", sans-serif; margin: 40px; color: #333; }
+    h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+    h2 { color: #2980b9; margin-top: 30px; }
+    h3 { color: #34495e; }
+    table { border-collapse: collapse; width: 100%; margin: 15px 0; }
+    th { background: #3498db; color: white; padding: 10px; text-align: left; border: 1px solid #2980b9; }
+    td { padding: 8px 10px; border: 1px solid #ddd; }
+    tr:nth-child(even) { background: #f8f9fa; }
+    .risk-high { color: #c0392b; font-weight: bold; }
+    .risk-medium { color: #e67e22; font-weight: bold; }
+    .risk-low { color: #27ae60; font-weight: bold; }
+    .summary-box { background: #ecf0f1; padding: 20px; border-radius: 8px; margin: 20px 0; }
+    .footer { margin-top: 50px; color: #95a5a6; font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+    <h1>构件横向对比分析报告</h1>
+    <div class="summary-box">
+        <p><strong>生成时间:</strong> %s</p>
+        <p><strong>分组方式:</strong> %s</p>
+        <p><strong>对比构件数:</strong> %d 个</p>
+        <p><strong>检测记录总数:</strong> %d 条</p>
+        <p><strong>整体平均含水率:</strong> %s%%</p>
+        <p><strong>含水率阈值:</strong> %s%%</p>
+    </div>
+    <h2>分组统计对比</h2>
+    <table>
+        <tr><th>分组</th><th>构件数</th><th>记录数</th><th>平均含水率</th><th>最高含水率</th><th>最低含水率</th><th>超标占比</th></tr>
+""" % (gen_time, group_by_label, comp_count, overall_stats['count'], overall_stats['avg'], threshold)
+
+    for key, data in comparison["groups"].items():
+        avg_class = "risk-high" if data['avg_moisture'] > threshold else "risk-low"
+        max_class = "risk-high" if data['max_moisture'] > threshold else ""
+        if data['high_ratio'] > 30:
+            ratio_class = "risk-high"
+        elif data['high_ratio'] > 10:
+            ratio_class = "risk-medium"
+        else:
+            ratio_class = "risk-low"
+        html += """
+        <tr>
+            <td>%s</td>
+            <td>%d</td>
+            <td>%d</td>
+            <td class="%s">%s%%</td>
+            <td class="%s">%s%%</td>
+            <td>%s%%</td>
+            <td class="%s">%s%%</td>
+        </tr>
+""" % (key, data['component_count'], data['record_count'],
+       avg_class, data['avg_moisture'],
+       max_class, data['max_moisture'],
+       data['min_moisture'],
+       ratio_class, data['high_ratio'])
+
+    html += """
+    </table>
+    <h2>各构件详细数据</h2>
+"""
+
+    risk_map = {"高风险": "risk-high", "中风险": "risk-medium", "正常": "risk-low"}
+
+    for key, data in comparison["groups"].items():
+        html += "<h3>%s</h3>" % key
+        html += """
+        <table>
+            <tr><th>构件编号</th><th>构件名称</th><th>类型</th><th>记录数</th><th>平均含水率</th><th>最高含水率</th><th>风险等级</th></tr>
+"""
+        for comp in data["components"]:
+            risk_class = risk_map.get(comp["risk_level"], "")
+            avg_class = "risk-high" if comp['stats']['avg'] > threshold else ""
+            max_class = "risk-high" if comp['stats']['max'] > threshold else ""
+            html += """
+            <tr>
+                <td>%s</td>
+                <td>%s</td>
+                <td>%s</td>
+                <td>%d</td>
+                <td class="%s">%s%%</td>
+                <td class="%s">%s%%</td>
+                <td class="%s">%s</td>
+            </tr>
+""" % (comp['code'], comp['name'], comp['component_type'],
+       comp['record_count'],
+       avg_class, comp['stats']['avg'],
+       max_class, comp['stats']['max'],
+       risk_class, comp['risk_level'])
+        html += "</table>"
+
+    html += """
+    <div class="footer">
+        报告由「古建筑木构件含水率智能预警与多维分析系统」自动生成
+    </div>
+</body>
+</html>
+"""
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    return output_path
+
